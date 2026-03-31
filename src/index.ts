@@ -16,8 +16,3 @@ const port = Number(env.PORT) || 3000;
 app.listen(port, '0.0.0.0', () => {
   console.log(`🤖 Combinei Bot v2 rodando na porta ${port}`);
 });
-```
-
-Commit. Depois que redeployar, acessa:
-```
-https://combinei-production.up.railway.app/onboarding
