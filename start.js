@@ -1,7 +1,6 @@
+const { execSync } = require('child_process');
 try {
-  require('tsx/cjs/api').register();
-  require('./src/index.ts');
+  execSync('npx tsx src/index.ts', { stdio: 'inherit' });
 } catch (e) {
-  console.error('ERRO AO INICIAR:', e);
-  process.exit(1);
+  console.error('CRASH:', e.message);
 }
