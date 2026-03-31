@@ -14,19 +14,22 @@ router.post('/webhook', async (req: Request, res: Response) => {
   try {
     const body = req.body;
 
+    // Log TUDO que chega pra debug
+    console.log(`📨 Webhook recebido:`, JSON.stringify(body).substring(0, 500));
+
     if (body.fromMe || body.isGroup) return;
 
     const from = body.phone;
     const messageId = body.messageId;
     const instanceId = body.instanceId;
 
-    // Pegar texto da mensagem
     const texto = body.text?.message || body.body || body.message;
 
-    // Se não tem texto = é mídia (áudio, imagem, vídeo, etc.)
     if (!texto) {
-      console.log(`📩 Mídia recebida de ${from} (tipo: ${body.type || body.messageType || 'desconhecido'})`);
-      await enviarMensagem(from, 'Opa! Por enquanto só consigo ler mensagens de texto 😅 Pode digitar o que precisa? Prometo que respondo rapidinho!');
+      if (from) {
+        console.log(`📩 Mídia recebida de ${from} (tipo: ${body.type || body.messageType || 'desconhecido'})`);
+        await enviarMensagem(from, 'Opa! Por enquanto só consigo ler mensagens de texto 😅 Pode digitar o que precisa? Prometo que respondo rapidinho!');
+      }
       return;
     }
 
