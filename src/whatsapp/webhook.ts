@@ -16,10 +16,8 @@ router.post('/webhook', async (req, res) => {
     // Filtrar tudo que não é mensagem de texto recebida
     if (b.type === 'DeliveryCallback') return;
     if (b.type === 'MessageStatusCallback') return;
-    if (b.type === 'ReceivedCallback' && !b.text && !b.body) return;
     if (b.fromMe) return;
     if (b.isGroup) return;
-    if (b.status) return;
     if (!b.phone) return;
 
     const texto = b.text?.message || b.body;
