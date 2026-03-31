@@ -2,7 +2,7 @@
   "name": "combinei-bot",
   "version": "1.0.0",
   "scripts": {
-    "start": "node --import tsx src/index.ts",
+    "start": "node start.js",
     "dev": "tsx watch src/index.ts",
     "test:ai": "tsx src/ai/test.ts"
   },
