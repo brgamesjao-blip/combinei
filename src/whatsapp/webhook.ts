@@ -14,22 +14,18 @@ router.post('/webhook', async (req: Request, res: Response) => {
   try {
     const body = req.body;
 
-    // Ignorar callbacks de status e delivery
-    if (body.type === 'DeliveryCallback' || body.type === 'MessageStatusCallback' || body.status) return;
-    if (body.fromMe || body.isGroup) return;
+    if (!body.text && !body.body && !body.message) return;
+    if (body.fromMe) return;
+    if (body.isGroup) return;
+    if (body.status) return;
     if (!body.phone) return;
 
     const from = body.phone;
     const messageId = body.messageId;
     const instanceId = body.instanceId;
-
     const texto = body.text?.message || body.body || body.message;
 
-    if (!texto) {
-      console.log(`📩 Mídia de ${from}`);
-      await enviarMensagem(from, 'Opa! Por enquanto só consigo ler mensagens de texto 😅 Pode digitar o que precisa? Prometo que respondo rapidinho!');
-      return;
-    }
+    if (!texto) return;
 
     console.log(`📩 Mensagem de ${from}: ${texto}`);
 
@@ -198,8 +194,6 @@ router.post('/webhook', async (req: Request, res: Response) => {
 
           console.log('✅ Agendamento salvo');
           await limparConversa(clinica.id, from);
-        } else {
-          console.log('⚠️ Não conseguiu resolver data/hora ou profissional');
         }
       } catch (err) {
         console.error('❌ Erro ao criar evento:', err);
