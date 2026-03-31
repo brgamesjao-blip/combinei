@@ -8,33 +8,21 @@ import {
   HorarioDisponivel,
 } from '../types';
 
-// ═══════════════════════════════════════
-// Motor de IA — Conversa Inteligente
-// ═══════════════════════════════════════
-
 const anthropic = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
 
-/**
- * Processa uma mensagem e retorna resposta + contexto atualizado.
- */
 export async function processarMensagem(
   mensagemPaciente: string,
   contexto: ContextoConversa,
   historicoPaciente?: string
 ): Promise<{ resposta: string; contexto: ContextoConversa }> {
 
-  // 1. Extrair dados
   const dadosExtraidos = await extrairDados(mensagemPaciente);
-
-  // 2. Atualizar contexto
   const contextoAtualizado = atualizarContexto(contexto, dadosExtraidos);
 
-  // 3. Horários como texto
   const horariosTexto = formatarHorariosDisponiveis(
     contextoAtualizado.horariosOferecidos || []
   );
 
-  // 4. Gerar resposta com Claude
   const systemPrompt = buildSystemPrompt(
     contexto.clinica,
     horariosTexto,
@@ -46,7 +34,6 @@ export async function processarMensagem(
     content: mensagemPaciente,
   });
 
-  // Limitar histórico pra não estourar contexto (últimas 20 mensagens)
   const mensagensRecentes = contextoAtualizado.historicoMensagens.slice(-20);
 
   const response = await anthropic.messages.create({
@@ -68,15 +55,11 @@ export async function processarMensagem(
     content: resposta,
   });
 
-  // 5. Atualizar etapa
   contextoAtualizado.etapa = determinarEtapa(contextoAtualizado, dadosExtraidos, resposta);
 
   return { resposta, contexto: contextoAtualizado };
 }
 
-/**
- * Extrai dados estruturados da mensagem.
- */
 export async function extrairDados(mensagem: string): Promise<DadosExtraidos> {
   try {
     const response = await anthropic.messages.create({
@@ -98,9 +81,6 @@ export async function extrairDados(mensagem: string): Promise<DadosExtraidos> {
   }
 }
 
-/**
- * Atualiza contexto com novos dados extraídos.
- */
 function atualizarContexto(
   contexto: ContextoConversa,
   dados: DadosExtraidos
@@ -120,36 +100,22 @@ function atualizarContexto(
   };
 }
 
-/**
- * Determina etapa da conversa.
- */
 function determinarEtapa(
   contexto: ContextoConversa,
   dados: DadosExtraidos,
   resposta: string
 ): ContextoConversa['etapa'] {
-  // Combinei! = agendamento concluído
   if (resposta.toLowerCase().includes('combinei!')) {
     return 'agendamento_concluido';
   }
 
-  // Cancelamento
-  if (dados.intencao === 'cancelar') {
-    return 'identificar_intencao';
-  }
+  const intencao = String(dados.intencao);
 
-  // Dúvida → encaminhar humano
-  if (dados.intencao === 'duvida') {
-    return 'encaminhar_humano';
-  }
+  if (intencao === 'cancelar') return 'identificar_intencao';
+  if (intencao === 'duvida') return 'encaminhar_humano';
+  if (intencao === 'saudacao' || intencao === 'agradecimento') return 'inicio';
 
-  // Saudação ou agradecimento
-  if (dados.intencao === 'saudacao' || dados.intencao === 'agradecimento') {
-    return 'inicio';
-  }
-
-  // Agendamento
-  if (dados.intencao === 'agendar' || dados.intencao === 'remarcar' || dados.intencao === 'consultar_horarios') {
+  if (intencao === 'agendar' || intencao === 'remarcar' || intencao === 'consultar_horarios') {
     const d = contexto.dadosColetados;
     if (!d.profissional) return 'coletar_profissional';
     if (!d.data) return 'coletar_data';
@@ -160,9 +126,6 @@ function determinarEtapa(
   return 'identificar_intencao';
 }
 
-/**
- * Formata horários disponíveis.
- */
 function formatarHorariosDisponiveis(horarios: HorarioDisponivel[]): string {
   if (horarios.length === 0) return '';
 
@@ -171,9 +134,6 @@ function formatarHorariosDisponiveis(horarios: HorarioDisponivel[]): string {
     .join('\n');
 }
 
-/**
- * Cria contexto inicial.
- */
 export function criarContextoInicial(clinica: Clinica): ContextoConversa {
   return {
     clinica,
