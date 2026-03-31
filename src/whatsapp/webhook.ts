@@ -14,6 +14,8 @@ router.post('/webhook', async (req: Request, res: Response) => {
   try {
     const body = req.body;
 
+    console.log(`📨 RAW:`, JSON.stringify(body).substring(0, 300));
+    
     if (!body.text && !body.body && !body.message) return;
     if (body.fromMe) return;
     if (body.isGroup) return;
