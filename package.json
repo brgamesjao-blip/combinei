@@ -1,9 +1,8 @@
 {
   "name": "combinei-bot",
   "version": "1.0.0",
-  "description": "Combinei — Agendamento automático por WhatsApp para clínicas",
   "scripts": {
-    "start": "npx tsx src/index.ts",
+    "start": "node --import tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "test:ai": "tsx src/ai/test.ts"
   },
