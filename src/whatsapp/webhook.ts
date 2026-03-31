@@ -14,10 +14,10 @@ router.post('/webhook', async (req: Request, res: Response) => {
   try {
     const body = req.body;
 
-    // Log TUDO que chega pra debug
-    console.log(`📨 Webhook recebido:`, JSON.stringify(body).substring(0, 500));
-
+    // Ignorar callbacks de status e delivery
+    if (body.type === 'DeliveryCallback' || body.type === 'MessageStatusCallback' || body.status) return;
     if (body.fromMe || body.isGroup) return;
+    if (!body.phone) return;
 
     const from = body.phone;
     const messageId = body.messageId;
@@ -26,10 +26,8 @@ router.post('/webhook', async (req: Request, res: Response) => {
     const texto = body.text?.message || body.body || body.message;
 
     if (!texto) {
-      if (from) {
-        console.log(`📩 Mídia recebida de ${from} (tipo: ${body.type || body.messageType || 'desconhecido'})`);
-        await enviarMensagem(from, 'Opa! Por enquanto só consigo ler mensagens de texto 😅 Pode digitar o que precisa? Prometo que respondo rapidinho!');
-      }
+      console.log(`📩 Mídia de ${from}`);
+      await enviarMensagem(from, 'Opa! Por enquanto só consigo ler mensagens de texto 😅 Pode digitar o que precisa? Prometo que respondo rapidinho!');
       return;
     }
 
