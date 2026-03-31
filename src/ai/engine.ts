@@ -5,51 +5,55 @@ import {
   Clinica,
   ContextoConversa,
   DadosExtraidos,
-  Mensagem,
   HorarioDisponivel,
 } from '../types';
 
 // ═══════════════════════════════════════
-// Motor de IA — Conversa com Claude
+// Motor de IA — Conversa Inteligente
 // ═══════════════════════════════════════
 
 const anthropic = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
 
 /**
- * Processa uma mensagem do paciente e retorna a resposta do bot.
- * Esta é a função principal — recebe o contexto da conversa e a mensagem,
- * e retorna a resposta + contexto atualizado.
+ * Processa uma mensagem e retorna resposta + contexto atualizado.
  */
 export async function processarMensagem(
   mensagemPaciente: string,
-  contexto: ContextoConversa
+  contexto: ContextoConversa,
+  historicoPaciente?: string
 ): Promise<{ resposta: string; contexto: ContextoConversa }> {
 
-  // 1. Extrair dados estruturados da mensagem
+  // 1. Extrair dados
   const dadosExtraidos = await extrairDados(mensagemPaciente);
-  
-  // 2. Atualizar contexto com novos dados
+
+  // 2. Atualizar contexto
   const contextoAtualizado = atualizarContexto(contexto, dadosExtraidos);
 
-  // 3. Montar horários disponíveis como texto
+  // 3. Horários como texto
   const horariosTexto = formatarHorariosDisponiveis(
     contextoAtualizado.horariosOferecidos || []
   );
 
-  // 4. Gerar resposta conversacional com Claude
-  const systemPrompt = buildSystemPrompt(contexto.clinica, horariosTexto);
+  // 4. Gerar resposta com Claude
+  const systemPrompt = buildSystemPrompt(
+    contexto.clinica,
+    horariosTexto,
+    historicoPaciente
+  );
 
-  // Adicionar mensagem do paciente ao histórico
   contextoAtualizado.historicoMensagens.push({
     role: 'user',
     content: mensagemPaciente,
   });
 
+  // Limitar histórico pra não estourar contexto (últimas 20 mensagens)
+  const mensagensRecentes = contextoAtualizado.historicoMensagens.slice(-20);
+
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 500,
     system: systemPrompt,
-    messages: contextoAtualizado.historicoMensagens.map(m => ({
+    messages: mensagensRecentes.map(m => ({
       role: m.role,
       content: m.content,
     })),
@@ -59,21 +63,19 @@ export async function processarMensagem(
     ? response.content[0].text
     : '';
 
-  // Adicionar resposta do bot ao histórico
   contextoAtualizado.historicoMensagens.push({
     role: 'assistant',
     content: resposta,
   });
 
-  // 5. Atualizar etapa da conversa
-  contextoAtualizado.etapa = determinarEtapa(contextoAtualizado, resposta);
+  // 5. Atualizar etapa
+  contextoAtualizado.etapa = determinarEtapa(contextoAtualizado, dadosExtraidos, resposta);
 
   return { resposta, contexto: contextoAtualizado };
 }
 
 /**
- * Extrai dados estruturados (intenção, profissional, data, etc.)
- * de uma mensagem em linguagem natural.
+ * Extrai dados estruturados da mensagem.
  */
 export async function extrairDados(mensagem: string): Promise<DadosExtraidos> {
   try {
@@ -88,7 +90,6 @@ export async function extrairDados(mensagem: string): Promise<DadosExtraidos> {
       ? response.content[0].text
       : '{}';
 
-    // Limpar possíveis backticks do JSON
     const clean = text.replace(/```json?\n?|\n?```/g, '').trim();
     return JSON.parse(clean) as DadosExtraidos;
   } catch (error) {
@@ -98,8 +99,7 @@ export async function extrairDados(mensagem: string): Promise<DadosExtraidos> {
 }
 
 /**
- * Atualiza o contexto da conversa com os novos dados extraídos.
- * Mantém dados anteriores se os novos forem null.
+ * Atualiza contexto com novos dados extraídos.
  */
 function atualizarContexto(
   contexto: ContextoConversa,
@@ -115,34 +115,45 @@ function atualizarContexto(
       data: dados.data || contexto.dadosColetados.data,
       horario: dados.horario || contexto.dadosColetados.horario,
       periodo: dados.periodo || contexto.dadosColetados.periodo,
+      pacienteNome: dados.pacienteNome || contexto.dadosColetados.pacienteNome,
     },
   };
 }
 
 /**
- * Determina em qual etapa da conversa estamos baseado nos dados coletados.
+ * Determina etapa da conversa.
  */
 function determinarEtapa(
   contexto: ContextoConversa,
+  dados: DadosExtraidos,
   resposta: string
 ): ContextoConversa['etapa'] {
-  const { dadosColetados } = contexto;
-
-  // Se a resposta contém "Combinei!" → agendamento concluído
+  // Combinei! = agendamento concluído
   if (resposta.toLowerCase().includes('combinei!')) {
     return 'agendamento_concluido';
   }
 
-  // Se a intenção é dúvida ou outro → encaminhar
-  if (dadosColetados.intencao === 'duvida') {
+  // Cancelamento
+  if (dados.intencao === 'cancelar') {
+    return 'identificar_intencao';
+  }
+
+  // Dúvida → encaminhar humano
+  if (dados.intencao === 'duvida') {
     return 'encaminhar_humano';
   }
 
-  // Se é agendamento, verificar o que falta
-  if (dadosColetados.intencao === 'agendar' || dadosColetados.intencao === 'consultar_horarios') {
-    if (!dadosColetados.profissional) return 'coletar_profissional';
-    if (!dadosColetados.data) return 'coletar_data';
-    if (!dadosColetados.horario) return 'coletar_horario';
+  // Saudação ou agradecimento
+  if (dados.intencao === 'saudacao' || dados.intencao === 'agradecimento') {
+    return 'inicio';
+  }
+
+  // Agendamento
+  if (dados.intencao === 'agendar' || dados.intencao === 'remarcar' || dados.intencao === 'consultar_horarios') {
+    const d = contexto.dadosColetados;
+    if (!d.profissional) return 'coletar_profissional';
+    if (!d.data) return 'coletar_data';
+    if (!d.horario) return 'coletar_horario';
     return 'confirmar_agendamento';
   }
 
@@ -150,12 +161,10 @@ function determinarEtapa(
 }
 
 /**
- * Formata os horários disponíveis em texto legível para o prompt.
+ * Formata horários disponíveis.
  */
 function formatarHorariosDisponiveis(horarios: HorarioDisponivel[]): string {
-  if (horarios.length === 0) {
-    return 'Nenhum horário disponível carregado ainda.';
-  }
+  if (horarios.length === 0) return '';
 
   return horarios
     .map(h => `${h.diaSemana} ${h.data}: ${h.horarios.join(', ')}`)
@@ -163,7 +172,7 @@ function formatarHorariosDisponiveis(horarios: HorarioDisponivel[]): string {
 }
 
 /**
- * Cria um contexto inicial para uma nova conversa.
+ * Cria contexto inicial.
  */
 export function criarContextoInicial(clinica: Clinica): ContextoConversa {
   return {

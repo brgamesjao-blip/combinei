@@ -6,15 +6,12 @@ import { criarEvento, configurarTokens, buscarHorariosDisponiveis } from '../cal
 import { Clinica } from '../types';
 import { supabase } from '../db/client';
 
-// ═══════════════════════════════════════
-// WhatsApp Webhook — Z-API + Calendar
-// ═══════════════════════════════════════
-
 const router = Router();
 
-/**
- * POST /webhook — Recebe mensagens do Z-API
- */
+// ═══════════════════════════════════════
+// Webhook principal — Z-API
+// ═══════════════════════════════════════
+
 router.post('/webhook', async (req: Request, res: Response) => {
   res.sendStatus(200);
 
@@ -23,16 +20,42 @@ router.post('/webhook', async (req: Request, res: Response) => {
 
     if (body.fromMe || body.isGroup) return;
 
-    const texto = body.text?.message || body.body;
-    if (!texto) return;
-
     const from = body.phone;
     const messageId = body.messageId;
     const instanceId = body.instanceId;
 
+    // ─── Detectar tipo de mensagem ───
+    const isAudio = body.audio || body.type === 'audio' || body.messageType === 'audio';
+    const isImage = body.image || body.type === 'image' || body.messageType === 'image';
+    const isVideo = body.video || body.type === 'video' || body.messageType === 'video';
+    const isSticker = body.sticker || body.type === 'sticker' || body.messageType === 'sticker';
+    const isDocument = body.document || body.type === 'document' || body.messageType === 'document';
+    const isLocation = body.location || body.type === 'location';
+
+    // Se não é texto, responde pedindo pra digitar
+    if (isAudio) {
+      await enviarMensagem(from, 'Desculpa, ainda não consigo ouvir áudios 😅 Pode digitar o que precisa? Prometo que respondo rapidinho!');
+      return;
+    }
+    if (isImage || isVideo || isSticker) {
+      await enviarMensagem(from, 'Opa, não consigo ver imagens ou vídeos por aqui! Me conta por texto o que você precisa? 😊');
+      return;
+    }
+    if (isDocument) {
+      await enviarMensagem(from, 'Não consigo abrir documentos, mas se precisar agendar uma consulta é só me dizer! 📅');
+      return;
+    }
+    if (isLocation) {
+      await enviarMensagem(from, 'Recebi sua localização! Mas pra agendar, me diz o dia e horário que prefere? 😊');
+      return;
+    }
+
+    const texto = body.text?.message || body.body;
+    if (!texto) return;
+
     console.log(`📩 Mensagem de ${from}: ${texto}`);
 
-    // 1. Buscar clínica
+    // ─── 1. Buscar clínica ───
     let { data: clinicaRow } = await supabase
       .from('clinicas')
       .select('*')
@@ -72,16 +95,10 @@ router.post('/webhook', async (req: Request, res: Response) => {
       nome: clinicaRow.nome,
       telefone: clinicaRow.telefone,
       profissionais: (profs || []).map(p => ({
-        id: p.id,
-        nome: p.nome,
-        especialidade: p.especialidade,
-        servicos: [],
+        id: p.id, nome: p.nome, especialidade: p.especialidade, servicos: [],
       })),
       servicos: (servs || []).map(s => ({
-        id: s.id,
-        nome: s.nome,
-        duracaoMinutos: s.duracao_minutos,
-        preco: s.preco,
+        id: s.id, nome: s.nome, duracaoMinutos: s.duracao_minutos, preco: s.preco,
       })),
       horarioFuncionamento: {
         segunda: { inicio: clinicaRow.horario_abertura, fim: clinicaRow.horario_fechamento },
@@ -89,17 +106,42 @@ router.post('/webhook', async (req: Request, res: Response) => {
         quarta: { inicio: clinicaRow.horario_abertura, fim: clinicaRow.horario_fechamento },
         quinta: { inicio: clinicaRow.horario_abertura, fim: clinicaRow.horario_fechamento },
         sexta: { inicio: clinicaRow.horario_abertura, fim: clinicaRow.horario_fechamento },
-        sabado: null,
-        domingo: null,
+        sabado: null, domingo: null,
       },
     };
 
     console.log(`🏥 Clínica: ${clinica.nome}`);
 
-    // 2. Marcar como lida
+    // ─── 2. Marcar como lida ───
     await marcarComoLida(messageId, from);
 
-    // 3. Buscar ou criar contexto
+    // ─── 3. Buscar histórico do paciente (agendamentos anteriores) ───
+    let historicoPaciente = '';
+    const { data: agendamentosAnteriores } = await supabase
+      .from('agendamentos')
+      .select('*, profissionais(nome)')
+      .eq('clinica_id', clinica.id)
+      .eq('paciente_telefone', from)
+      .order('created_at', { ascending: false })
+      .limit(5);
+
+    if (agendamentosAnteriores && agendamentosAnteriores.length > 0) {
+      historicoPaciente = agendamentosAnteriores.map(a => {
+        const nome = a.paciente_nome || 'Paciente';
+        const prof = (a.profissionais as any)?.nome || 'profissional';
+        const data = new Date(a.data_hora).toLocaleDateString('pt-BR');
+        const hora = new Date(a.data_hora).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        return `- ${nome} agendou com ${prof} em ${data} às ${hora} (status: ${a.status})`;
+      }).join('\n');
+
+      // Pegar o nome do paciente do histórico
+      const nomeConhecido = agendamentosAnteriores[0]?.paciente_nome;
+      if (nomeConhecido) {
+        historicoPaciente = `Nome do paciente: ${nomeConhecido}\n\nAgendamentos anteriores:\n${historicoPaciente}`;
+      }
+    }
+
+    // ─── 4. Buscar ou criar contexto ───
     const conversaSalva = await buscarConversa(clinica.id, from);
     let contexto = criarContextoInicial(clinica);
 
@@ -109,7 +151,7 @@ router.post('/webhook', async (req: Request, res: Response) => {
       contexto.historicoMensagens = conversaSalva.historicoMensagens;
     }
 
-    // 4. Carregar horários reais do Google Calendar (se conectado)
+    // ─── 5. Carregar horários do Google Calendar ───
     const tokens = await buscarTokensGoogle(clinica.id);
     if (tokens) {
       try {
@@ -117,32 +159,29 @@ router.post('/webhook', async (req: Request, res: Response) => {
 
         const hoje = new Date();
         const daqui7dias = new Date(hoje.getTime() + 7 * 24 * 60 * 60 * 1000);
-        const dataInicio = hoje.toISOString().split('T')[0];
-        const dataFim = daqui7dias.toISOString().split('T')[0];
 
         contexto.horariosOferecidos = await buscarHorariosDisponiveis(
           tokens.calendar_id,
-          dataInicio,
-          dataFim,
+          hoje.toISOString().split('T')[0],
+          daqui7dias.toISOString().split('T')[0],
           30,
           clinicaRow.horario_abertura,
           clinicaRow.horario_fechamento
         );
 
-        console.log(`📅 Horários carregados: ${contexto.horariosOferecidos.length} dias disponíveis`);
+        console.log(`📅 ${contexto.horariosOferecidos.length} dias com horários disponíveis`);
       } catch (err) {
-        console.error('⚠️ Erro ao buscar Calendar, usando horários padrão:', err);
+        console.error('⚠️ Erro Calendar:', err);
         contexto.horariosOferecidos = gerarHorariosPadrao();
       }
     } else {
-      console.log('⚠️ Google Calendar não conectado, usando horários padrão');
       contexto.horariosOferecidos = gerarHorariosPadrao();
     }
 
-    // 5. Processar com IA
-    const resultado = await processarMensagem(texto, contexto);
+    // ─── 6. Processar com IA (passando histórico do paciente) ───
+    const resultado = await processarMensagem(texto, contexto, historicoPaciente || undefined);
 
-    // 6. Salvar conversa
+    // ─── 7. Salvar conversa ───
     await salvarConversa(clinica.id, from, {
       etapa: resultado.contexto.etapa,
       dadosColetados: resultado.contexto.dadosColetados,
@@ -151,26 +190,23 @@ router.post('/webhook', async (req: Request, res: Response) => {
 
     console.log(`💬 Resposta: ${resultado.resposta}`);
 
-    // 7. Enviar resposta
+    // ─── 8. Enviar resposta ───
     await enviarMensagem(from, resultado.resposta);
 
-    // 8. Se agendamento concluído, criar evento no Calendar
+    // ─── 9. Criar evento no Calendar se confirmou ───
     if (resultado.contexto.etapa === 'agendamento_concluido' && tokens) {
       try {
         const dados = resultado.contexto.dadosColetados;
-        
-        // Encontrar profissional
-        const prof = clinica.profissionais.find(p => 
+
+        const prof = clinica.profissionais.find(p =>
           p.nome.toLowerCase().includes((dados.profissional || '').toLowerCase())
         );
 
-        // Montar data/hora do agendamento
         const dataHora = resolverDataHora(dados.data, dados.horario);
 
         if (dataHora && prof) {
           configurarTokens({ access_token: tokens.access_token, refresh_token: tokens.refresh_token });
 
-          // Criar evento no Google Calendar
           const eventId = await criarEvento(tokens.calendar_id, {
             titulo: `${prof.nome} — Consulta`,
             descricao: `Agendado via Combinei`,
@@ -180,9 +216,8 @@ router.post('/webhook', async (req: Request, res: Response) => {
             pacienteTelefone: from,
           });
 
-          console.log(`📅 Evento criado no Calendar: ${eventId}`);
+          console.log(`📅 Evento criado: ${eventId}`);
 
-          // Salvar agendamento no banco
           await criarAgendamento({
             clinicaId: clinica.id,
             profissionalId: prof.id,
@@ -193,15 +228,11 @@ router.post('/webhook', async (req: Request, res: Response) => {
             googleEventId: eventId,
           });
 
-          console.log('✅ Agendamento salvo no banco');
-
-          // Limpar conversa pra próxima interação
+          console.log('✅ Agendamento salvo');
           await limparConversa(clinica.id, from);
-        } else {
-          console.log('⚠️ Não conseguiu resolver data/hora ou profissional pra criar evento');
         }
       } catch (err) {
-        console.error('❌ Erro ao criar evento no Calendar:', err);
+        console.error('❌ Erro ao criar evento:', err);
       }
     }
 
@@ -210,9 +241,6 @@ router.post('/webhook', async (req: Request, res: Response) => {
   }
 });
 
-/**
- * GET /webhook — Health check
- */
 router.get('/webhook', (_req: Request, res: Response) => {
   res.json({ status: 'ok' });
 });
@@ -221,18 +249,15 @@ router.get('/webhook', (_req: Request, res: Response) => {
 // Helpers
 // ═══════════════════════════════════════
 
-/**
- * Gera horários padrão quando Calendar não tá conectado.
- */
 function gerarHorariosPadrao() {
   const dias = [];
   const hoje = new Date();
+  const diasSemana = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
 
-  for (let i = 1; i <= 5; i++) {
+  for (let i = 1; i <= 7; i++) {
     const d = new Date(hoje.getTime() + i * 24 * 60 * 60 * 1000);
     if (d.getDay() === 0 || d.getDay() === 6) continue;
 
-    const diasSemana = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
     dias.push({
       data: d.toISOString().split('T')[0],
       diaSemana: diasSemana[d.getDay()],
@@ -243,10 +268,6 @@ function gerarHorariosPadrao() {
   return dias;
 }
 
-/**
- * Resolve menções de data/hora naturais em ISO datetime.
- * Ex: "terça", "15:30" → "2026-04-01T15:30:00"
- */
 function resolverDataHora(data?: string, horario?: string): string | null {
   if (!horario) return null;
 
@@ -254,25 +275,20 @@ function resolverDataHora(data?: string, horario?: string): string | null {
   let dataAlvo: Date | null = null;
 
   if (!data) {
-    // Sem data, usa amanhã
     dataAlvo = new Date(hoje.getTime() + 24 * 60 * 60 * 1000);
   } else if (data.match(/^\d{4}-\d{2}-\d{2}$/)) {
-    // Formato ISO
     dataAlvo = new Date(data + 'T00:00:00-03:00');
   } else if (data.match(/^\d{2}\/\d{2}$/)) {
-    // Formato DD/MM
     const [dia, mes] = data.split('/').map(Number);
     dataAlvo = new Date(hoje.getFullYear(), mes - 1, dia);
   } else {
-    // Tentar resolver dia da semana
     const diasMap: Record<string, number> = {
       'domingo': 0, 'segunda': 1, 'terca': 2, 'terça': 2,
       'quarta': 3, 'quinta': 4, 'sexta': 5, 'sabado': 6, 'sábado': 6,
-      'amanha': 1, 'amanhã': 1,
     };
 
-    const dataLower = data.toLowerCase().replace('-feira', '');
-    
+    const dataLower = data.toLowerCase().replace('-feira', '').trim();
+
     if (dataLower === 'amanha' || dataLower === 'amanhã') {
       dataAlvo = new Date(hoje.getTime() + 24 * 60 * 60 * 1000);
     } else if (dataLower === 'hoje') {
@@ -281,8 +297,7 @@ function resolverDataHora(data?: string, horario?: string): string | null {
       const diaAlvo = diasMap[dataLower];
       if (diaAlvo !== undefined) {
         dataAlvo = new Date(hoje);
-        const diaAtual = hoje.getDay();
-        let diff = diaAlvo - diaAtual;
+        let diff = diaAlvo - hoje.getDay();
         if (diff <= 0) diff += 7;
         dataAlvo.setDate(hoje.getDate() + diff);
       }
@@ -291,12 +306,10 @@ function resolverDataHora(data?: string, horario?: string): string | null {
 
   if (!dataAlvo) return null;
 
-  // Formatar: "2026-04-01T15:30:00"
   const ano = dataAlvo.getFullYear();
   const mes = String(dataAlvo.getMonth() + 1).padStart(2, '0');
   const dia = String(dataAlvo.getDate()).padStart(2, '0');
 
-  // Normalizar horário
   const horaMatch = horario.match(/(\d{1,2}):?(\d{2})?/);
   if (!horaMatch) return null;
 
