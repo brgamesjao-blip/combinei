@@ -1,46 +1,103 @@
-import express from 'express';
-import { env } from './config/env';
-import whatsappWebhook from './whatsapp/webhook';
-import calendarRoutes from './calendar/routes';
-
 // ═══════════════════════════════════════
-// Combinei Bot — Servidor Principal
+// Tipos do sistema Combinei
 // ═══════════════════════════════════════
 
-const app = express();
+// ─── Clínica ───
+export interface Clinica {
+  id: string;
+  nome: string;
+  telefone: string;
+  profissionais: Profissional[];
+  servicos: Servico[];
+  horarioFuncionamento: HorarioFuncionamento;
+}
 
-app.use(express.json());
+export interface Profissional {
+  id: string;
+  nome: string;
+  especialidade: string;
+  servicos: string[];
+}
 
-// Health check
-app.get('/', (_req, res) => {
-  res.json({
-    name: 'Combinei Bot',
-    status: 'online',
-    version: '1.0.0',
-  });
-});
+export interface Servico {
+  id: string;
+  nome: string;
+  duracaoMinutos: number;
+  preco?: number;
+}
 
-// Google Calendar OAuth
-app.use(calendarRoutes);
+export interface HorarioFuncionamento {
+  [dia: string]: { inicio: string; fim: string } | null;
+}
 
-// WhatsApp webhook
-app.use(whatsappWebhook);
+// ─── Agendamento ───
+export interface Agendamento {
+  id: string;
+  pacienteNome: string;
+  pacienteTelefone: string;
+  profissionalId: string;
+  servicoId: string;
+  dataHora: string;
+  duracaoMinutos: number;
+  status: 'confirmado' | 'cancelado' | 'remarcado';
+  googleCalendarEventId?: string;
+}
 
-// Start
-app.listen(env.PORT, () => {
-  console.log(`
-╔══════════════════════════════════════╗
-║        🤖 Combinei Bot v1.0         ║
-╠══════════════════════════════════════╣
-║  Servidor rodando na porta ${String(env.PORT).padEnd(9)}║
-║                                      ║
-║  Endpoints:                          ║
-║  GET  /                → Health      ║
-║  GET  /auth/google     → Conectar    ║
-║  GET  /webhook         → Verificação ║
-║  POST /webhook         → Mensagens   ║
-║                                      ║
-║  Teste: npm run test:ai              ║
-╚══════════════════════════════════════╝
-  `);
-});
+// ─── Horário Disponível ───
+export interface HorarioDisponivel {
+  data: string;
+  diaSemana: string;
+  horarios: string[];
+}
+
+// ─── Conversa / IA ───
+export type Intencao =
+  | 'agendar'
+  | 'remarcar'
+  | 'cancelar'
+  | 'consultar_horarios'
+  | 'saudacao'
+  | 'duvida'
+  | 'agradecimento'
+  | 'outro';
+
+export interface DadosExtraidos {
+  intencao: Intencao;
+  profissional?: string;
+  servico?: string;
+  data?: string;
+  horario?: string;
+  periodo?: 'manha' | 'tarde' | 'noite';
+  pacienteNome?: string;
+}
+
+export interface ContextoConversa {
+  clinica: Clinica;
+  etapa: EtapaConversa;
+  dadosColetados: Partial<DadosExtraidos>;
+  horariosOferecidos?: HorarioDisponivel[];
+  historicoMensagens: Mensagem[];
+}
+
+export type EtapaConversa =
+  | 'inicio'
+  | 'identificar_intencao'
+  | 'coletar_profissional'
+  | 'coletar_data'
+  | 'coletar_horario'
+  | 'confirmar_agendamento'
+  | 'agendamento_concluido'
+  | 'encaminhar_humano';
+
+export interface Mensagem {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+// ─── WhatsApp ───
+export interface WhatsAppMessage {
+  from: string;
+  body: string;
+  timestamp: number;
+  messageId: string;
+}
