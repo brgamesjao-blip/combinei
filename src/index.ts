@@ -8,6 +8,12 @@ console.log('🚀 Iniciando Combinei Bot...');
 const app = express();
 app.use(express.json());
 
+// Log TODA request que chega
+app.use((req, res, next) => {
+  console.log(`🌐 ${req.method} ${req.path}`);
+  next();
+});
+
 app.get('/', (_req, res) => {
   res.json({ name: 'Combinei Bot', status: 'online' });
 });
