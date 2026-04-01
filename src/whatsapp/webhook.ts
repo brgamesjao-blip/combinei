@@ -5,38 +5,59 @@ import { buscarConversa, salvarConversa, limparConversa, criarAgendamento, busca
 import { criarEvento, configurarTokens, buscarHorariosDisponiveis, verificarSlotDisponivel } from '../calendar/client';
 import { Clinica } from '../types';
 
-const router = Router();
+var router = Router();
 
-router.post('/webhook', async (req, res) => {
+router.post('/webhook', async function(req, res) {
   res.sendStatus(200);
   try {
-    const b = req.body;
+    var body = req.body;
 
-    if (b.type === 'DeliveryCallback') return;
-    if (b.type === 'MessageStatusCallback') return;
-    if (b.fromMe) return;
-    if (b.isGroup) return;
-    if (!b.phone) return;
+    var event = body.event;
+    if (!event || event !== 'messages.upsert') return;
 
-    const texto = b.text?.message || b.body;
-    if (!texto) return;
+    var data = body.data;
+    if (!data || !data.key) return;
+    if (data.key.fromMe) return;
 
-    console.log(`📩 ${b.phone}: ${texto}`);
+    var instanceName = body.instance;
+    var remoteJid = data.key.remoteJid || '';
+    if (remoteJid.includes('@g.us')) return;
 
-    let { data: clinicaRow } = await supabase
-      .from('clinicas').select('*').eq('ativa', true).limit(1).single();
+    var phone = remoteJid.replace('@s.whatsapp.net', '').replace('@c.us', '');
+    if (!phone) return;
 
-    if (!clinicaRow) { console.log('❌ Sem clinica'); return; }
+    var texto = '';
+    if (data.message) {
+      texto = data.message.conversation || data.message.extendedTextMessage?.text || '';
+    }
 
-    const { data: profs } = await supabase
+    if (!texto) {
+      console.log('Midia de ' + phone + ', ignorando');
+      return;
+    }
+
+    console.log('Mensagem de ' + phone + ': ' + texto);
+
+    var { data: clinicaRow } = await supabase
+      .from('clinicas').select('*').eq('phone_number_id', instanceName).eq('ativa', true).single();
+
+    if (!clinicaRow) {
+      var { data: primeira } = await supabase
+        .from('clinicas').select('*').eq('ativa', true).limit(1).single();
+      clinicaRow = primeira;
+    }
+
+    if (!clinicaRow) { console.log('Sem clinica'); return; }
+
+    var { data: profs } = await supabase
       .from('profissionais').select('*').eq('clinica_id', clinicaRow.id).eq('ativo', true);
-    const { data: servs } = await supabase
+    var { data: servs } = await supabase
       .from('servicos').select('*').eq('clinica_id', clinicaRow.id).eq('ativo', true);
 
-    const clinica: Clinica = {
+    var clinica: Clinica = {
       id: clinicaRow.id, nome: clinicaRow.nome, telefone: clinicaRow.telefone || '',
-      profissionais: (profs || []).map((p: any) => ({ id: p.id, nome: p.nome, especialidade: p.especialidade, servicos: [] })),
-      servicos: (servs || []).map((s: any) => ({ id: s.id, nome: s.nome, duracaoMinutos: s.duracao_minutos, preco: s.preco })),
+      profissionais: (profs || []).map(function(p: any) { return { id: p.id, nome: p.nome, especialidade: p.especialidade, servicos: [] }; }),
+      servicos: (servs || []).map(function(s: any) { return { id: s.id, nome: s.nome, duracaoMinutos: s.duracao_minutos, preco: s.preco }; }),
       horarioFuncionamento: {
         segunda: { inicio: clinicaRow.horario_abertura, fim: clinicaRow.horario_fechamento },
         terca: { inicio: clinicaRow.horario_abertura, fim: clinicaRow.horario_fechamento },
@@ -47,22 +68,22 @@ router.post('/webhook', async (req, res) => {
       },
     };
 
-    console.log(`🏥 ${clinica.nome}`);
+    console.log('Clinica: ' + clinica.nome);
 
-    const salva = await buscarConversa(clinica.id, b.phone);
-    let ctx = criarContextoInicial(clinica);
+    var salva = await buscarConversa(clinica.id, phone);
+    var ctx = criarContextoInicial(clinica);
     if (salva) {
       ctx.etapa = salva.etapa;
       ctx.dadosColetados = salva.dadosColetados;
       ctx.historicoMensagens = salva.historicoMensagens;
     }
 
-    const tokens = await buscarTokensGoogle(clinica.id);
+    var tokens = await buscarTokensGoogle(clinica.id);
     if (tokens) {
       try {
         configurarTokens({ access_token: tokens.access_token, refresh_token: tokens.refresh_token }, clinica.id);
-        const hoje = new Date();
-        const fim = new Date(hoje.getTime() + 7 * 86400000);
+        var hoje = new Date();
+        var fim = new Date(hoje.getTime() + 7 * 86400000);
         ctx.horariosOferecidos = await buscarHorariosDisponiveis(
           tokens.calendar_id, hoje.toISOString().split('T')[0], fim.toISOString().split('T')[0],
           30, clinicaRow.horario_abertura, clinicaRow.horario_fechamento,
@@ -73,86 +94,81 @@ router.post('/webhook', async (req, res) => {
       ctx.horariosOferecidos = gerarHorarios();
     }
 
-    let hist = '';
-    const { data: antigos } = await supabase.from('agendamentos')
+    var hist = '';
+    var { data: antigos } = await supabase.from('agendamentos')
       .select('*, profissionais(nome)')
-      .eq('clinica_id', clinica.id).eq('paciente_telefone', b.phone)
+      .eq('clinica_id', clinica.id).eq('paciente_telefone', phone)
       .order('created_at', { ascending: false }).limit(5);
     if (antigos && antigos.length > 0) {
-      hist = antigos.map((a: any) => `- ${a.paciente_nome || 'Paciente'} com ${(a.profissionais as any)?.nome || '?'} em ${new Date(a.data_hora).toLocaleDateString('pt-BR')}`).join('\n');
+      hist = antigos.map(function(a: any) { return '- ' + (a.paciente_nome || 'Paciente') + ' com ' + ((a.profissionais as any)?.nome || '?') + ' em ' + new Date(a.data_hora).toLocaleDateString('pt-BR'); }).join('\n');
     }
 
-    const resultado = await processarMensagem(texto, ctx, hist || undefined);
+    var resultado = await processarMensagem(texto, ctx, hist || undefined);
 
-    await salvarConversa(clinica.id, b.phone, {
+    await salvarConversa(clinica.id, phone, {
       etapa: resultado.contexto.etapa,
       dadosColetados: resultado.contexto.dadosColetados,
       historicoMensagens: resultado.contexto.historicoMensagens,
     });
 
-    console.log(`💬 ${resultado.resposta}`);
-    await enviarMensagem(b.phone, resultado.resposta);
+    console.log('Resposta: ' + resultado.resposta);
+    await enviarMensagem(phone, resultado.resposta, instanceName);
 
     if (resultado.contexto.etapa === 'agendamento_concluido' && tokens) {
       try {
-        const d = resultado.contexto.dadosColetados;
+        var d = resultado.contexto.dadosColetados;
 
-        const prof = clinica.profissionais.find(p => {
-          const nomeProf = p.nome.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-          const busca = (d.profissional || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        var prof = clinica.profissionais.find(function(p) {
+          var nomeProf = p.nome.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+          var busca = (d.profissional || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
           if (nomeProf.includes(busca) || busca.includes(nomeProf)) return true;
-          const palavras = busca.replace(/^(doutora?|dra?\.?|doutor|dr\.?)\s*/i, '').split(/\s+/).filter(Boolean);
-          return palavras.length > 0 && palavras.every(w => nomeProf.includes(w));
+          var palavras = busca.replace(/^(doutora?|dra?\.?|doutor|dr\.?)\s*/i, '').split(/\s+/).filter(Boolean);
+          return palavras.length > 0 && palavras.every(function(w) { return nomeProf.includes(w); });
         });
 
-        const dt = resolverDataHora(d.data, d.horario);
-
-        console.log('🔍 Match: prof=' + (prof?.nome || 'NULL') + ' dt=' + (dt || 'NULL') + ' | busca=' + d.profissional + ' data=' + d.data + ' horario=' + d.horario);
+        var dt = resolverDataHora(d.data, d.horario);
 
         if (dt && prof) {
           configurarTokens({ access_token: tokens.access_token, refresh_token: tokens.refresh_token }, clinica.id);
 
-          const disponivel = await verificarSlotDisponivel(tokens.calendar_id, dt, 30);
+          var disponivel = await verificarSlotDisponivel(tokens.calendar_id, dt, 30);
 
           if (!disponivel) {
-            await enviarMensagem(b.phone, 'Ops! Esse horario acabou de ser ocupado por outro paciente 😕 Quer que eu te mostre outros horarios disponiveis?');
-            console.log('⚠️ Slot conflitante');
-            await salvarConversa(clinica.id, b.phone, {
+            await enviarMensagem(phone, 'Ops! Esse horario acabou de ser ocupado 😕 Quer que eu te mostre outros horarios?', instanceName);
+            await salvarConversa(clinica.id, phone, {
               etapa: 'coletar_horario',
               dadosColetados: { ...resultado.contexto.dadosColetados, horario: undefined },
               historicoMensagens: resultado.contexto.historicoMensagens,
             });
           } else {
-            const eid = await criarEvento(tokens.calendar_id, {
+            var eid = await criarEvento(tokens.calendar_id, {
               titulo: prof.nome + ' — Consulta', descricao: 'Via Combinei',
               dataHoraInicio: dt, duracaoMinutos: 30,
-              pacienteNome: d.pacienteNome || 'Paciente', pacienteTelefone: b.phone,
+              pacienteNome: d.pacienteNome || 'Paciente', pacienteTelefone: phone,
             });
-            console.log('📅 Evento: ' + eid);
+            console.log('Evento: ' + eid);
             await criarAgendamento({
               clinicaId: clinica.id, profissionalId: prof.id,
-              pacienteNome: d.pacienteNome || 'Paciente', pacienteTelefone: b.phone,
+              pacienteNome: d.pacienteNome || 'Paciente', pacienteTelefone: phone,
               dataHora: dt, duracaoMinutos: 30, googleEventId: eid,
             });
-            await limparConversa(clinica.id, b.phone);
-            console.log('✅ Salvo');
+            await limparConversa(clinica.id, phone);
+            console.log('Salvo');
           }
-        } else {
-          console.log('⚠️ Nao resolveu. prof=' + d.profissional + ' data=' + d.data + ' horario=' + d.horario);
         }
-      } catch (e: any) { console.error('❌ Calendar:', e.message); }
+      } catch (e: any) { console.error('Calendar:', e.message); }
     }
-  } catch (e: any) { console.error('❌ Webhook:', e.message); }
+  } catch (e: any) { console.error('Webhook:', e.message); }
 });
 
-router.get('/webhook', (_, res) => res.json({ status: 'ok' }));
+router.get('/webhook', function(_, res) { res.json({ status: 'ok' }); });
 
 function gerarHorarios() {
-  const dias: any[] = [];
-  const nomes = ['Domingo','Segunda','Terca','Quarta','Quinta','Sexta','Sabado'];
-  const hoje = new Date();
-  for (let i = 1; i <= 7; i++) {
-    const d = new Date(hoje.getTime() + i * 86400000);
+  var dias: any[] = [];
+  var nomes = ['Domingo','Segunda','Terca','Quarta','Quinta','Sexta','Sabado'];
+  var hoje = new Date();
+  for (var i = 1; i <= 7; i++) {
+    var d = new Date(hoje.getTime() + i * 86400000);
     if (d.getDay() === 0 || d.getDay() === 6) continue;
     dias.push({ data: d.toISOString().split('T')[0], diaSemana: nomes[d.getDay()], horarios: ['09:00','10:00','11:00','14:00','15:00','16:00'] });
   }
@@ -161,34 +177,34 @@ function gerarHorarios() {
 
 function resolverDataHora(data?: string, horario?: string): string | null {
   if (!horario && !data) return null;
-  const hoje = new Date();
-  let alvo: Date | null = null;
+  var hoje = new Date();
+  var alvo: Date | null = null;
 
   if (!data) { alvo = new Date(hoje.getTime() + 86400000); }
   else if (data.match(/^\d{4}-\d{2}-\d{2}$/)) { alvo = new Date(data); }
   else if (data.match(/\d{2}\/\d{2}/)) {
-    const m = data.match(/(\d{2})\/(\d{2})/);
+    var m = data.match(/(\d{2})\/(\d{2})/);
     if (m) alvo = new Date(hoje.getFullYear(), +m[2] - 1, +m[1]);
   } else if (data.match(/dia\s*(\d{1,2})/i)) {
-    const m = data.match(/dia\s*(\d{1,2})/i);
-    if (m) { alvo = new Date(hoje.getFullYear(), hoje.getMonth(), +m[1]); if (alvo <= hoje) alvo.setMonth(alvo.getMonth() + 1); }
+    var m2 = data.match(/dia\s*(\d{1,2})/i);
+    if (m2) { alvo = new Date(hoje.getFullYear(), hoje.getMonth(), +m2[1]); if (alvo <= hoje) alvo.setMonth(alvo.getMonth() + 1); }
   } else {
-    const map: any = { domingo:0, segunda:1, terca:2, 'terça':2, quarta:3, quinta:4, sexta:5, sabado:6, 'sábado':6 };
-    const dl = data.toLowerCase().replace('-feira','').trim();
+    var map: any = { domingo:0, segunda:1, terca:2, 'terça':2, quarta:3, quinta:4, sexta:5, sabado:6, 'sábado':6 };
+    var dl = data.toLowerCase().replace('-feira','').trim();
     if (dl === 'amanha' || dl === 'amanhã') alvo = new Date(hoje.getTime() + 86400000);
     else if (dl === 'hoje') alvo = hoje;
-    else { const t = map[dl]; if (t !== undefined) { alvo = new Date(hoje); let diff = t - hoje.getDay(); if (diff <= 0) diff += 7; alvo.setDate(hoje.getDate() + diff); } }
+    else { var t = map[dl]; if (t !== undefined) { alvo = new Date(hoje); var diff = t - hoje.getDay(); if (diff <= 0) diff += 7; alvo.setDate(hoje.getDate() + diff); } }
   }
   if (!alvo) return null;
 
-  let h = '09', m = '00';
+  var h = '09', mn = '00';
   if (horario) {
-    const fm = horario.match(/(\d{1,2}):(\d{2})/);
-    const sm = horario.match(/(\d{1,2})\s*(?:h|da|$)/i);
-    if (fm) { h = fm[1].padStart(2,'0'); m = fm[2]; }
-    else if (sm) { let hr = +sm[1]; if (horario.toLowerCase().includes('tarde') || horario.toLowerCase().includes('noite')) { if (hr < 12) hr += 12; } if (hr < 7) hr += 12; h = String(hr).padStart(2,'0'); }
+    var fm = horario.match(/(\d{1,2}):(\d{2})/);
+    var sm = horario.match(/(\d{1,2})\s*(?:h|da|$)/i);
+    if (fm) { h = fm[1].padStart(2,'0'); mn = fm[2]; }
+    else if (sm) { var hr = +sm[1]; if (horario.toLowerCase().includes('tarde') || horario.toLowerCase().includes('noite')) { if (hr < 12) hr += 12; } if (hr < 7) hr += 12; h = String(hr).padStart(2,'0'); }
   }
-  return `${alvo.getFullYear()}-${String(alvo.getMonth()+1).padStart(2,'0')}-${String(alvo.getDate()).padStart(2,'0')}T${h}:${m}:00`;
+  return alvo.getFullYear() + '-' + String(alvo.getMonth()+1).padStart(2,'0') + '-' + String(alvo.getDate()).padStart(2,'0') + 'T' + h + ':' + mn + ':00';
 }
 
 export default router;
