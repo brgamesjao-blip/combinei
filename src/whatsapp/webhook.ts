@@ -11,7 +11,6 @@ router.post('/webhook', async (req, res) => {
   res.sendStatus(200);
   try {
     const b = req.body;
-    console.log(`📨 WEBHOOK: type=${b.type} fromMe=${b.fromMe} phone=${b.phone} text=${b.text?.message || b.body || ''}`);
 
     if (b.type === 'DeliveryCallback') return;
     if (b.type === 'MessageStatusCallback') return;
@@ -20,12 +19,9 @@ router.post('/webhook', async (req, res) => {
     if (!b.phone) return;
 
     const texto = b.text?.message || b.body;
-    if (!texto) {
-      console.log(`📩 Midia de ${b.phone}, ignorando`);
-      return;
-    }
+    if (!texto) return;
 
-    console.log(`📩 Texto de ${b.phone}: ${texto}`);
+    console.log(`📩 ${b.phone}: ${texto}`);
 
     let { data: clinicaRow } = await supabase
       .from('clinicas').select('*').eq('ativa', true).limit(1).single();
@@ -100,8 +96,18 @@ router.post('/webhook', async (req, res) => {
     if (resultado.contexto.etapa === 'agendamento_concluido' && tokens) {
       try {
         const d = resultado.contexto.dadosColetados;
-        const prof = clinica.profissionais.find(p => p.nome.toLowerCase().includes((d.profissional || '').toLowerCase()));
+
+        const prof = clinica.profissionais.find(p => {
+          const nomeProf = p.nome.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+          const busca = (d.profissional || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+          if (nomeProf.includes(busca) || busca.includes(nomeProf)) return true;
+          const palavras = busca.replace(/^(doutora?|dra?\.?|doutor|dr\.?)\s*/i, '').split(/\s+/).filter(Boolean);
+          return palavras.length > 0 && palavras.every(w => nomeProf.includes(w));
+        });
+
         const dt = resolverDataHora(d.data, d.horario);
+
+        console.log('🔍 Match: prof=' + (prof?.nome || 'NULL') + ' dt=' + (dt || 'NULL') + ' | busca=' + d.profissional + ' data=' + d.data + ' horario=' + d.horario);
 
         if (dt && prof) {
           configurarTokens({ access_token: tokens.access_token, refresh_token: tokens.refresh_token }, clinica.id);
@@ -132,7 +138,7 @@ router.post('/webhook', async (req, res) => {
             console.log('✅ Salvo');
           }
         } else {
-          console.log('⚠️ Nao resolveu data/hora ou profissional. data=' + d.data + ' horario=' + d.horario + ' prof=' + d.profissional);
+          console.log('⚠️ Nao resolveu. prof=' + d.profissional + ' data=' + d.data + ' horario=' + d.horario);
         }
       } catch (e: any) { console.error('❌ Calendar:', e.message); }
     }
