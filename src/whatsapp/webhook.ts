@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { enviarMensagem } from './client';
 import { processarMensagem, criarContextoInicial } from '../ai/engine';
 import { buscarConversa, salvarConversa, limparConversa, criarAgendamento, buscarTokensGoogle, supabase } from '../db/client';
-import { criarEvento, configurarTokens, buscarHorariosDisponiveis } from '../calendar/client';
+import { criarEvento, configurarTokens, buscarHorariosDisponiveis, verificarSlotDisponivel } from '../calendar/client';
 import { Clinica } from '../types';
 
 const router = Router();
@@ -13,7 +13,6 @@ router.post('/webhook', async (req, res) => {
     const b = req.body;
     console.log(`📨 WEBHOOK: type=${b.type} fromMe=${b.fromMe} phone=${b.phone} text=${b.text?.message || b.body || ''}`);
 
-    // Filtrar tudo que não é mensagem de texto recebida
     if (b.type === 'DeliveryCallback') return;
     if (b.type === 'MessageStatusCallback') return;
     if (b.fromMe) return;
@@ -22,17 +21,16 @@ router.post('/webhook', async (req, res) => {
 
     const texto = b.text?.message || b.body;
     if (!texto) {
-      console.log(`📩 Mídia de ${b.phone}, ignorando`);
+      console.log(`📩 Midia de ${b.phone}, ignorando`);
       return;
     }
 
     console.log(`📩 Texto de ${b.phone}: ${texto}`);
 
-    // Buscar clinica
     let { data: clinicaRow } = await supabase
       .from('clinicas').select('*').eq('ativa', true).limit(1).single();
 
-    if (!clinicaRow) { console.log('❌ Sem clínica'); return; }
+    if (!clinicaRow) { console.log('❌ Sem clinica'); return; }
 
     const { data: profs } = await supabase
       .from('profissionais').select('*').eq('clinica_id', clinicaRow.id).eq('ativo', true);
@@ -55,7 +53,6 @@ router.post('/webhook', async (req, res) => {
 
     console.log(`🏥 ${clinica.nome}`);
 
-    // Contexto
     const salva = await buscarConversa(clinica.id, b.phone);
     let ctx = criarContextoInicial(clinica);
     if (salva) {
@@ -64,11 +61,10 @@ router.post('/webhook', async (req, res) => {
       ctx.historicoMensagens = salva.historicoMensagens;
     }
 
-    // Horários
     const tokens = await buscarTokensGoogle(clinica.id);
     if (tokens) {
       try {
-        configurarTokens({ access_token: tokens.access_token, refresh_token: tokens.refresh_token });
+        configurarTokens({ access_token: tokens.access_token, refresh_token: tokens.refresh_token }, clinica.id);
         const hoje = new Date();
         const fim = new Date(hoje.getTime() + 7 * 86400000);
         ctx.horariosOferecidos = await buscarHorariosDisponiveis(
@@ -80,7 +76,6 @@ router.post('/webhook', async (req, res) => {
       ctx.horariosOferecidos = gerarHorarios();
     }
 
-    // Histórico
     let hist = '';
     const { data: antigos } = await supabase.from('agendamentos')
       .select('*, profissionais(nome)')
@@ -90,7 +85,6 @@ router.post('/webhook', async (req, res) => {
       hist = antigos.map((a: any) => `- ${a.paciente_nome || 'Paciente'} com ${(a.profissionais as any)?.nome || '?'} em ${new Date(a.data_hora).toLocaleDateString('pt-BR')}`).join('\n');
     }
 
-    // IA
     const resultado = await processarMensagem(texto, ctx, hist || undefined);
 
     await salvarConversa(clinica.id, b.phone, {
@@ -102,27 +96,40 @@ router.post('/webhook', async (req, res) => {
     console.log(`💬 ${resultado.resposta}`);
     await enviarMensagem(b.phone, resultado.resposta);
 
-    // Calendar
     if (resultado.contexto.etapa === 'agendamento_concluido' && tokens) {
       try {
         const d = resultado.contexto.dadosColetados;
         const prof = clinica.profissionais.find(p => p.nome.toLowerCase().includes((d.profissional || '').toLowerCase()));
         const dt = resolverDataHora(d.data, d.horario);
+
         if (dt && prof) {
-          configurarTokens({ access_token: tokens.access_token, refresh_token: tokens.refresh_token });
-          const eid = await criarEvento(tokens.calendar_id, {
-            titulo: `${prof.nome} — Consulta`, descricao: 'Via Combinei',
-            dataHoraInicio: dt, duracaoMinutos: 30,
-            pacienteNome: d.pacienteNome || 'Paciente', pacienteTelefone: b.phone,
-          });
-          console.log(`📅 Evento: ${eid}`);
-          await criarAgendamento({
-            clinicaId: clinica.id, profissionalId: prof.id,
-            pacienteNome: d.pacienteNome || 'Paciente', pacienteTelefone: b.phone,
-            dataHora: dt, duracaoMinutos: 30, googleEventId: eid,
-          });
-          await limparConversa(clinica.id, b.phone);
-          console.log('✅ Salvo');
+          configurarTokens({ access_token: tokens.access_token, refresh_token: tokens.refresh_token }, clinica.id);
+
+          const disponivel = await verificarSlotDisponivel(tokens.calendar_id, dt, 30);
+
+          if (!disponivel) {
+            await enviarMensagem(b.phone, 'Ops! Esse horario acabou de ser ocupado por outro paciente 😕 Quer que eu te mostre outros horarios disponiveis?');
+            console.log('⚠️ Slot conflitante');
+            await salvarConversa(clinica.id, b.phone, {
+              etapa: 'coletar_horario',
+              dadosColetados: { ...resultado.contexto.dadosColetados, horario: undefined },
+              historicoMensagens: resultado.contexto.historicoMensagens,
+            });
+          } else {
+            const eid = await criarEvento(tokens.calendar_id, {
+              titulo: prof.nome + ' — Consulta', descricao: 'Via Combinei',
+              dataHoraInicio: dt, duracaoMinutos: 30,
+              pacienteNome: d.pacienteNome || 'Paciente', pacienteTelefone: b.phone,
+            });
+            console.log('📅 Evento: ' + eid);
+            await criarAgendamento({
+              clinicaId: clinica.id, profissionalId: prof.id,
+              pacienteNome: d.pacienteNome || 'Paciente', pacienteTelefone: b.phone,
+              dataHora: dt, duracaoMinutos: 30, googleEventId: eid,
+            });
+            await limparConversa(clinica.id, b.phone);
+            console.log('✅ Salvo');
+          }
         }
       } catch (e: any) { console.error('❌ Calendar:', e.message); }
     }
@@ -133,7 +140,7 @@ router.get('/webhook', (_, res) => res.json({ status: 'ok' }));
 
 function gerarHorarios() {
   const dias: any[] = [];
-  const nomes = ['Domingo','Segunda','Terça','Quarta','Quinta','Sexta','Sábado'];
+  const nomes = ['Domingo','Segunda','Terca','Quarta','Quinta','Sexta','Sabado'];
   const hoje = new Date();
   for (let i = 1; i <= 7; i++) {
     const d = new Date(hoje.getTime() + i * 86400000);
