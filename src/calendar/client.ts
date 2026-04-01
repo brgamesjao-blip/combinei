@@ -22,7 +22,6 @@ export function configurarTokens(tokens: { access_token: string; refresh_token: 
   if (clinicaId) currentClinicaId = clinicaId;
 }
 
-// Refresh automático — quando o token expira, pega novo e salva no banco
 oauth2Client.on('tokens', async (tokens) => {
   if (tokens.access_token && currentClinicaId) {
     try {
@@ -31,8 +30,8 @@ oauth2Client.on('tokens', async (tokens) => {
       const update: any = { google_access_token: tokens.access_token };
       if (tokens.refresh_token) update.google_refresh_token = tokens.refresh_token;
       await supa.from('clinicas').update(update).eq('id', currentClinicaId);
-      console.log('🔄 Google token refreshed e salvo pra clinica', currentClinicaId);
-    } catch (e) { console.error('Erro ao salvar token refreshed:', e); }
+      console.log('🔄 Token refreshed pra clinica', currentClinicaId);
+    } catch (e) { console.error('Erro refresh:', e); }
   }
 });
 
@@ -40,29 +39,16 @@ export async function verificarSlotDisponivel(calendarId: string, dataHoraInicio
   try {
     const inicio = new Date(dataHoraInicio + '-03:00');
     const fim = new Date(inicio.getTime() + duracaoMinutos * 60000);
-
     const fb = await calendar.freebusy.query({
-      requestBody: {
-        timeMin: inicio.toISOString(),
-        timeMax: fim.toISOString(),
-        timeZone: 'America/Sao_Paulo',
-        items: [{ id: calendarId }],
-      },
+      requestBody: { timeMin: inicio.toISOString(), timeMax: fim.toISOString(), timeZone: 'America/Sao_Paulo', items: [{ id: calendarId }] },
     });
-
     const busy = fb.data.calendars?.[calendarId]?.busy || [];
-    if (busy.length > 0) {
-      console.log('❌ Slot ocupado:', dataHoraInicio);
-      return false;
-    }
+    if (busy.length > 0) { console.log('❌ Slot ocupado:', dataHoraInicio); return false; }
     return true;
-  } catch (e) {
-    console.error('Erro ao verificar slot:', e);
-    return true;
-  }
+  } catch (e) { return true; }
 }
 
-export async function buscarHorariosDisponiveis(calendarId: string, dataInicio: string, dataFim: string, duracao: number = 30, abertura: string = '08:00', fechamento: string = '18:00'): Promise<HorarioDisponivel[]> {
+export async function buscarHorariosDisponiveis(calendarId: string, dataInicio: string, dataFim: string, duracao: number = 30, abertura: string = '08:00', fechamento: string = '18:00', almocoInicio?: string, almocoFim?: string): Promise<HorarioDisponivel[]> {
   try {
     const fb = await calendar.freebusy.query({
       requestBody: {
@@ -78,7 +64,7 @@ export async function buscarHorariosDisponiveis(calendarId: string, dataInicio: 
     for (let d = new Date(ini); d <= fim; d.setDate(d.getDate() + 1)) {
       if (d.getDay() === 0 || d.getDay() === 6) continue;
       const ds = d.toISOString().split('T')[0];
-      const slots = gerarSlots(ds, abertura, fechamento, duracao);
+      const slots = gerarSlots(ds, abertura, fechamento, duracao, almocoInicio, almocoFim);
       const livres = slots.filter(s => {
         const si = new Date(ds + 'T' + s + ':00-03:00'); const sf = new Date(si.getTime() + duracao * 60000);
         return !busy.some(b => si < new Date(b.end!) && sf > new Date(b.start!));
@@ -103,13 +89,22 @@ export async function criarEvento(calendarId: string, ev: { titulo: string; desc
   return r.data.id || '';
 }
 
-function gerarSlots(data: string, abertura: string, fechamento: string, duracao: number): string[] {
+function gerarSlots(data: string, abertura: string, fechamento: string, duracao: number, almocoInicio?: string, almocoFim?: string): string[] {
   const slots: string[] = [];
-  const [ha, ma] = abertura.split(':').map(Number); const [hf, mf] = fechamento.split(':').map(Number);
-  let min = ha * 60 + ma; const maxMin = hf * 60 + mf;
-  const agora = new Date(); const ehHoje = new Date(data).toDateString() === agora.toDateString();
+  const [ha, ma] = abertura.split(':').map(Number);
+  const [hf, mf] = fechamento.split(':').map(Number);
+  const almI = almocoInicio ? almocoInicio.split(':').map(Number) : [12, 0];
+  const almF = almocoFim ? almocoFim.split(':').map(Number) : [13, 0];
+  const almInicioMin = almI[0] * 60 + almI[1];
+  const almFimMin = almF[0] * 60 + almF[1];
+  let min = ha * 60 + ma;
+  const maxMin = hf * 60 + mf;
+  const agora = new Date();
+  const ehHoje = new Date(data).toDateString() === agora.toDateString();
   while (min + duracao <= maxMin) {
-    const h = Math.floor(min / 60); const m = min % 60;
+    if (min >= almInicioMin && min < almFimMin) { min += duracao; continue; }
+    const h = Math.floor(min / 60);
+    const m = min % 60;
     const hr = String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
     if (!ehHoje || min > agora.getHours() * 60 + agora.getMinutes() + 30) slots.push(hr);
     min += duracao;
