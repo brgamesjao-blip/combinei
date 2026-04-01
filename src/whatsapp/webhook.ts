@@ -69,7 +69,8 @@ router.post('/webhook', async (req, res) => {
         const fim = new Date(hoje.getTime() + 7 * 86400000);
         ctx.horariosOferecidos = await buscarHorariosDisponiveis(
           tokens.calendar_id, hoje.toISOString().split('T')[0], fim.toISOString().split('T')[0],
-          30, clinicaRow.horario_abertura, clinicaRow.horario_fechamento
+          30, clinicaRow.horario_abertura, clinicaRow.horario_fechamento,
+          clinicaRow.almoco_inicio, clinicaRow.almoco_fim
         );
       } catch (e) { ctx.horariosOferecidos = gerarHorarios(); }
     } else {
@@ -130,6 +131,8 @@ router.post('/webhook', async (req, res) => {
             await limparConversa(clinica.id, b.phone);
             console.log('✅ Salvo');
           }
+        } else {
+          console.log('⚠️ Nao resolveu data/hora ou profissional. data=' + d.data + ' horario=' + d.horario + ' prof=' + d.profissional);
         }
       } catch (e: any) { console.error('❌ Calendar:', e.message); }
     }
