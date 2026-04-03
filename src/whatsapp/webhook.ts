@@ -114,7 +114,7 @@ router.post('/webhook', async function(req, res) {
     console.log('Resposta: ' + resultado.resposta);
     await enviarMensagem(phone, resultado.resposta, instanceName);
 
-    if (resultado.contexto.etapa === 'agendamento_concluido' && tokens) {
+    if (resultado.contexto.etapa === 'agendamento_concluido') {
       try {
         var d = resultado.contexto.dadosColetados;
 
