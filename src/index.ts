@@ -26,7 +26,7 @@ app.listen(port, '0.0.0.0', function() {
     try {
       var r = await fetch('http://localhost:' + port + '/api/notifications/process');
       var d = await r.json();
-      if (d.sent > 0) console.log('Notificacoes enviadas: ' + d.sent);
+     if ((d as any).sent > 0) console.log('Notificacoes enviadas: ' + (d as any).sent);
     } catch(e) {}
   }, 3600000);
 });
