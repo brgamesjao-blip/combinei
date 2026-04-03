@@ -81,6 +81,22 @@ router.post('/webhook', async function(req, res) {
 
     ctx.horariosOferecidos = gerarHorarios(clinicaRow.horario_abertura, clinicaRow.horario_fechamento, clinicaRow.almoco_inicio, clinicaRow.almoco_fim);
 
+    // Check folgas — remove days when professionals are off
+    var { data: folgasList } = await supabase.from('folgas')
+      .select('data, profissional_id')
+      .eq('clinica_id', clinica.id)
+      .gte('data', new Date().toISOString().split('T')[0]);
+
+    if (folgasList && folgasList.length > 0) {
+      var folgasDates = new Set(folgasList.map(function(f: any) { return f.data; }));
+      // If ALL professionals are off on a date, remove that date entirely
+      ctx.horariosOferecidos = ctx.horariosOferecidos.filter(function(dia: any) {
+        var profsFolga = folgasList.filter(function(f: any) { return f.data === dia.data; });
+        // If number of profs on folga >= total profs, no one is available
+        return profsFolga.length < clinica.profissionais.length;
+      });
+    }
+
     // Check existing appointments to exclude booked slots
     var hoje = new Date();
     var fim = new Date(hoje.getTime() + 7 * 86400000);
