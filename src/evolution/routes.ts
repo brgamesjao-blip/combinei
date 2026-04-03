@@ -15,6 +15,17 @@ router.post('/evolution/create-instance', async function(req, res) {
       return;
     }
 
+    // Delete old instance first (ignore errors if doesn't exist)
+    try {
+      await fetch(EVO_URL + '/instance/delete/' + instanceName, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json', 'apikey': EVO_KEY },
+      });
+    } catch(e) {}
+
+    // Wait 1 second for cleanup
+    await new Promise(function(resolve) { setTimeout(resolve, 1000); });
+
     var webhookUrl = 'https://combinei-production.up.railway.app/webhook';
 
     var r = await fetch(EVO_URL + '/instance/create', {
