@@ -5,6 +5,12 @@ export interface Clinica {
   profissionais: Profissional[];
   servicos: Servico[];
   horarioFuncionamento: HorarioFuncionamento;
+  botNome: string;
+  msgSaudacao: string | null;
+  msgConfirmacao: string | null;
+  msgCancelamento: string | null;
+  msgForaHorario: string | null;
+  msgSemHorario: string | null;
 }
 
 export interface Profissional {

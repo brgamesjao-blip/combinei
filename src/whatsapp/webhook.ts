@@ -51,6 +51,12 @@ router.post('/webhook', async function(req, res) {
 
     var clinica: Clinica = {
       id: clinicaRow.id, nome: clinicaRow.nome, telefone: clinicaRow.telefone || '',
+      botNome: clinicaRow.bot_nome || 'Bia',
+      msgSaudacao: clinicaRow.msg_saudacao || null,
+      msgConfirmacao: clinicaRow.msg_confirmacao || null,
+      msgCancelamento: clinicaRow.msg_cancelamento || null,
+      msgForaHorario: clinicaRow.msg_fora_horario || null,
+      msgSemHorario: clinicaRow.msg_sem_horario || null,
       profissionais: (profs || []).map(function(p: any) { return { id: p.id, nome: p.nome, especialidade: p.especialidade, servicos: [] }; }),
       servicos: (servs || []).map(function(s: any) { return { id: s.id, nome: s.nome, duracaoMinutos: s.duracao_minutos, preco: s.preco }; }),
       horarioFuncionamento: {
