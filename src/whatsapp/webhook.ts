@@ -222,7 +222,7 @@ function resolverDataHora(data?: string, horario?: string): string | null {
     if (fm) { h = fm[1].padStart(2,'0'); mn = fm[2]; }
     else if (sm) { var hr = +sm[1]; if (horario.toLowerCase().includes('tarde') || horario.toLowerCase().includes('noite')) { if (hr < 12) hr += 12; } if (hr < 7) hr += 12; h = String(hr).padStart(2,'0'); }
   }
-  return alvo.getFullYear() + '-' + String(alvo.getMonth()+1).padStart(2,'0') + '-' + String(alvo.getDate()).padStart(2,'0') + 'T' + h + ':' + mn + ':00';
+  return alvo.getFullYear() + '-' + String(alvo.getMonth()+1).padStart(2,'0') + '-' + String(alvo.getDate()).padStart(2,'0') + 'T' + h + ':' + mn + ':00-03:00';
 }
 
 export default router;
