@@ -35,27 +35,6 @@ export async function limparConversa(clinicaId: string, telefone: string) {
     .eq('paciente_telefone', telefone);
 }
 
-export async function buscarTokensGoogle(clinicaId: string) {
-  const { data } = await supabase
-    .from('clinicas')
-    .select('google_access_token, google_refresh_token, google_calendar_id')
-    .eq('id', clinicaId)
-    .single();
-  if (!data || !data.google_access_token) return null;
-  return {
-    access_token: data.google_access_token,
-    refresh_token: data.google_refresh_token,
-    calendar_id: data.google_calendar_id || 'primary',
-  };
-}
-
-export async function salvarTokensGoogle(clinicaId: string, tokens: any) {
-  const update: any = {};
-  if (tokens.access_token) update.google_access_token = tokens.access_token;
-  if (tokens.refresh_token) update.google_refresh_token = tokens.refresh_token;
-  await supabase.from('clinicas').update(update).eq('id', clinicaId);
-}
-
 export async function criarAgendamento(a: any) {
   await supabase.from('agendamentos').insert({
     clinica_id: a.clinicaId,
@@ -64,7 +43,6 @@ export async function criarAgendamento(a: any) {
     paciente_telefone: a.pacienteTelefone,
     data_hora: a.dataHora,
     duracao_minutos: a.duracaoMinutos,
-    google_event_id: a.googleEventId,
     status: 'confirmado',
   });
 }

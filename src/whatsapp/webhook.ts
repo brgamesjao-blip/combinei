@@ -1,8 +1,7 @@
 import { Router } from 'express';
 import { enviarMensagem } from './client';
 import { processarMensagem, criarContextoInicial } from '../ai/engine';
-import { buscarConversa, salvarConversa, limparConversa, criarAgendamento, buscarTokensGoogle, supabase } from '../db/client';
-import { criarEvento, configurarTokens, buscarHorariosDisponiveis, verificarSlotDisponivel } from '../calendar/client';
+import { buscarConversa, salvarConversa, limparConversa, criarAgendamento, supabase } from '../db/client';
 import { Clinica } from '../types';
 
 var router = Router();
@@ -11,7 +10,6 @@ router.post('/webhook', async function(req, res) {
   res.sendStatus(200);
   try {
     var body = req.body;
-
     var event = body.event;
     if (!event || event !== 'messages.upsert') return;
 
@@ -31,10 +29,7 @@ router.post('/webhook', async function(req, res) {
       texto = data.message.conversation || data.message.extendedTextMessage?.text || '';
     }
 
-    if (!texto) {
-      console.log('Midia de ' + phone + ', ignorando');
-      return;
-    }
+    if (!texto) { console.log('Midia de ' + phone + ', ignorando'); return; }
 
     console.log('Mensagem de ' + phone + ': ' + texto);
 
@@ -78,20 +73,19 @@ router.post('/webhook', async function(req, res) {
       ctx.historicoMensagens = salva.historicoMensagens;
     }
 
-    var tokens = await buscarTokensGoogle(clinica.id);
-    if (tokens) {
-      try {
-        configurarTokens({ access_token: tokens.access_token, refresh_token: tokens.refresh_token }, clinica.id);
-        var hoje = new Date();
-        var fim = new Date(hoje.getTime() + 7 * 86400000);
-        ctx.horariosOferecidos = await buscarHorariosDisponiveis(
-          tokens.calendar_id, hoje.toISOString().split('T')[0], fim.toISOString().split('T')[0],
-          30, clinicaRow.horario_abertura, clinicaRow.horario_fechamento,
-          clinicaRow.almoco_inicio, clinicaRow.almoco_fim
-        );
-      } catch (e) { ctx.horariosOferecidos = gerarHorarios(); }
-    } else {
-      ctx.horariosOferecidos = gerarHorarios();
+    ctx.horariosOferecidos = gerarHorarios(clinicaRow.horario_abertura, clinicaRow.horario_fechamento, clinicaRow.almoco_inicio, clinicaRow.almoco_fim);
+
+    // Check existing appointments to exclude booked slots
+    var hoje = new Date();
+    var fim = new Date(hoje.getTime() + 7 * 86400000);
+    var { data: existentes } = await supabase.from('agendamentos')
+      .select('data_hora, duracao_minutos')
+      .eq('clinica_id', clinica.id).eq('status', 'confirmado')
+      .gte('data_hora', hoje.toISOString().split('T')[0] + 'T00:00:00')
+      .lte('data_hora', fim.toISOString().split('T')[0] + 'T23:59:59');
+
+    if (existentes && existentes.length > 0) {
+      ctx.horariosOferecidos = filtrarOcupados(ctx.horariosOferecidos, existentes);
     }
 
     var hist = '';
@@ -114,7 +108,6 @@ router.post('/webhook', async function(req, res) {
     console.log('Resposta: ' + resultado.resposta);
     await enviarMensagem(phone, resultado.resposta, instanceName);
 
-    // ═══ SAVE APPOINTMENT — always, regardless of Google Calendar ═══
     if (resultado.contexto.etapa === 'agendamento_concluido') {
       try {
         var d = resultado.contexto.dadosColetados;
@@ -127,47 +120,18 @@ router.post('/webhook', async function(req, res) {
           return palavras.length > 0 && palavras.every(function(w) { return nomeProf.includes(w); });
         });
 
-        var dt = resolverDataHora(d.data, d.horario);
-
-        // Find service for duration
         var serv = clinica.servicos.find(function(s) {
           return (d.servico || '').toLowerCase().includes(s.nome.toLowerCase());
         });
-        var duracao = serv ? serv.duracaoMinutos : 30;
+        var duracao = serv ? serv.duracaoMinutos : (clinica.servicos.length > 0 ? clinica.servicos[0].duracaoMinutos : 30);
+
+        var dt = resolverDataHora(d.data, d.horario);
 
         if (dt && prof) {
-          var googleEventId: string | null = null;
-
-          // Google Calendar — optional
-          if (tokens) {
-            try {
-              configurarTokens({ access_token: tokens.access_token, refresh_token: tokens.refresh_token }, clinica.id);
-              var disponivel = await verificarSlotDisponivel(tokens.calendar_id, dt, duracao);
-              if (!disponivel) {
-                await enviarMensagem(phone, 'Ops! Esse horario acabou de ser ocupado 😕 Quer que eu te mostre outros horarios?', instanceName);
-                await salvarConversa(clinica.id, phone, {
-                  etapa: 'coletar_horario',
-                  dadosColetados: { ...resultado.contexto.dadosColetados, horario: undefined },
-                  historicoMensagens: resultado.contexto.historicoMensagens,
-                });
-                return; // Don't save, let patient pick another time
-              }
-              googleEventId = await criarEvento(tokens.calendar_id, {
-                titulo: prof.nome + ' — Consulta', descricao: 'Via Combinei',
-                dataHoraInicio: dt, duracaoMinutos: duracao,
-                pacienteNome: d.pacienteNome || 'Paciente', pacienteTelefone: phone,
-              });
-              console.log('Google Event: ' + googleEventId);
-            } catch (e: any) {
-              console.error('Calendar opcional:', e.message);
-            }
-          }
-
-          // ALWAYS save to database
           await criarAgendamento({
             clinicaId: clinica.id, profissionalId: prof.id,
             pacienteNome: d.pacienteNome || 'Paciente', pacienteTelefone: phone,
-            dataHora: dt, duracaoMinutos: duracao, googleEventId: googleEventId,
+            dataHora: dt, duracaoMinutos: duracao,
           });
           await limparConversa(clinica.id, phone);
           console.log('Agendamento salvo!');
@@ -181,16 +145,57 @@ router.post('/webhook', async function(req, res) {
 
 router.get('/webhook', function(_, res) { res.json({ status: 'ok' }); });
 
-function gerarHorarios() {
+function gerarHorarios(abertura?: string, fechamento?: string, almocoInicio?: string, almocoFim?: string) {
+  var inicio = abertura || '08:00';
+  var fim = fechamento || '18:00';
+  var almI = almocoInicio || '12:00';
+  var almF = almocoFim || '13:00';
+
+  var hInicio = parseInt(inicio.split(':')[0]);
+  var hFim = parseInt(fim.split(':')[0]);
+  var hAlmI = parseInt(almI.split(':')[0]);
+  var hAlmF = parseInt(almF.split(':')[0]);
+
   var dias: any[] = [];
   var nomes = ['Domingo','Segunda','Terca','Quarta','Quinta','Sexta','Sabado'];
   var hoje = new Date();
+
   for (var i = 1; i <= 7; i++) {
     var d = new Date(hoje.getTime() + i * 86400000);
     if (d.getDay() === 0 || d.getDay() === 6) continue;
-    dias.push({ data: d.toISOString().split('T')[0], diaSemana: nomes[d.getDay()], horarios: ['09:00','10:00','11:00','14:00','15:00','16:00'] });
+
+    var horarios: string[] = [];
+    for (var h = hInicio; h < hFim; h++) {
+      if (h >= hAlmI && h < hAlmF) continue;
+      horarios.push(String(h).padStart(2, '0') + ':00');
+      horarios.push(String(h).padStart(2, '0') + ':30');
+    }
+
+    dias.push({
+      data: d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'),
+      diaSemana: nomes[d.getDay()],
+      horarios: horarios,
+    });
   }
   return dias;
+}
+
+function filtrarOcupados(horarios: any[], existentes: any[]) {
+  var ocupados = new Set<string>();
+  existentes.forEach(function(e) {
+    var dt = new Date(e.data_hora);
+    var key = dt.getFullYear() + '-' + String(dt.getMonth()+1).padStart(2,'0') + '-' + String(dt.getDate()).padStart(2,'0') + '_' + String(dt.getHours()).padStart(2,'0') + ':' + String(dt.getMinutes()).padStart(2,'0');
+    ocupados.add(key);
+  });
+
+  return horarios.map(function(dia) {
+    return {
+      ...dia,
+      horarios: dia.horarios.filter(function(h: string) {
+        return !ocupados.has(dia.data + '_' + h);
+      }),
+    };
+  }).filter(function(dia) { return dia.horarios.length > 0; });
 }
 
 function resolverDataHora(data?: string, horario?: string): string | null {
@@ -199,7 +204,7 @@ function resolverDataHora(data?: string, horario?: string): string | null {
   var alvo: Date | null = null;
 
   if (!data) { alvo = new Date(hoje.getTime() + 86400000); }
-  else if (data.match(/^\d{4}-\d{2}-\d{2}$/)) { alvo = new Date(data); }
+  else if (data.match(/^\d{4}-\d{2}-\d{2}$/)) { alvo = new Date(data + 'T12:00:00'); }
   else if (data.match(/\d{2}\/\d{2}/)) {
     var m = data.match(/(\d{2})\/(\d{2})/);
     if (m) alvo = new Date(hoje.getFullYear(), +m[2] - 1, +m[1]);
@@ -210,7 +215,9 @@ function resolverDataHora(data?: string, horario?: string): string | null {
     var map: any = { domingo:0, segunda:1, terca:2, 'terça':2, quarta:3, quinta:4, sexta:5, sabado:6, 'sábado':6 };
     var dl = data.toLowerCase().replace('-feira','').trim();
     if (dl === 'amanha' || dl === 'amanhã') alvo = new Date(hoje.getTime() + 86400000);
-    else if (dl === 'hoje') alvo = hoje;
+    else if (dl === 'depois de amanha' || dl === 'depois de amanhã') alvo = new Date(hoje.getTime() + 2 * 86400000);
+    else if (dl === 'hoje') alvo = new Date(hoje);
+    else if (dl === 'semana que vem') { alvo = new Date(hoje); var diff2 = 1 - hoje.getDay(); if (diff2 <= 0) diff2 += 7; alvo.setDate(hoje.getDate() + diff2); }
     else { var t = map[dl]; if (t !== undefined) { alvo = new Date(hoje); var diff = t - hoje.getDay(); if (diff <= 0) diff += 7; alvo.setDate(hoje.getDate() + diff); } }
   }
   if (!alvo) return null;
@@ -218,9 +225,26 @@ function resolverDataHora(data?: string, horario?: string): string | null {
   var h = '09', mn = '00';
   if (horario) {
     var fm = horario.match(/(\d{1,2}):(\d{2})/);
-    var sm = horario.match(/(\d{1,2})\s*(?:h|da|$)/i);
-    if (fm) { h = fm[1].padStart(2,'0'); mn = fm[2]; }
-    else if (sm) { var hr = +sm[1]; if (horario.toLowerCase().includes('tarde') || horario.toLowerCase().includes('noite')) { if (hr < 12) hr += 12; } if (hr < 7) hr += 12; h = String(hr).padStart(2,'0'); }
+    if (fm) {
+      h = fm[1].padStart(2, '0');
+      mn = fm[2];
+    } else {
+      var sm = horario.match(/(\d{1,2})/);
+      if (sm) {
+        var hr = +sm[1];
+        if (horario.toLowerCase().includes('tarde') || horario.toLowerCase().includes('noite')) {
+          if (hr < 12) hr += 12;
+        } else if (horario.toLowerCase().includes('manhã') || horario.toLowerCase().includes('manha')) {
+          // keep as is
+        } else {
+          if (hr <= 6) hr += 12;
+        }
+        h = String(hr).padStart(2, '0');
+      }
+      if (horario.toLowerCase().includes('meia') || horario.toLowerCase().includes('30')) {
+        mn = '30';
+      }
+    }
   }
   return alvo.getFullYear() + '-' + String(alvo.getMonth()+1).padStart(2,'0') + '-' + String(alvo.getDate()).padStart(2,'0') + 'T' + h + ':' + mn + ':00-03:00';
 }
