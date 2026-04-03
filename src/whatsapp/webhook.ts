@@ -114,6 +114,7 @@ router.post('/webhook', async function(req, res) {
     console.log('Resposta: ' + resultado.resposta);
     await enviarMensagem(phone, resultado.resposta, instanceName);
 
+    // ═══ SAVE APPOINTMENT — always, regardless of Google Calendar ═══
     if (resultado.contexto.etapa === 'agendamento_concluido') {
       try {
         var d = resultado.contexto.dadosColetados;
@@ -128,35 +129,52 @@ router.post('/webhook', async function(req, res) {
 
         var dt = resolverDataHora(d.data, d.horario);
 
+        // Find service for duration
+        var serv = clinica.servicos.find(function(s) {
+          return (d.servico || '').toLowerCase().includes(s.nome.toLowerCase());
+        });
+        var duracao = serv ? serv.duracaoMinutos : 30;
+
         if (dt && prof) {
-          configurarTokens({ access_token: tokens.access_token, refresh_token: tokens.refresh_token }, clinica.id);
+          var googleEventId: string | null = null;
 
-          var disponivel = await verificarSlotDisponivel(tokens.calendar_id, dt, 30);
-
-          if (!disponivel) {
-            await enviarMensagem(phone, 'Ops! Esse horario acabou de ser ocupado 😕 Quer que eu te mostre outros horarios?', instanceName);
-            await salvarConversa(clinica.id, phone, {
-              etapa: 'coletar_horario',
-              dadosColetados: { ...resultado.contexto.dadosColetados, horario: undefined },
-              historicoMensagens: resultado.contexto.historicoMensagens,
-            });
-          } else {
-            var eid = await criarEvento(tokens.calendar_id, {
-              titulo: prof.nome + ' — Consulta', descricao: 'Via Combinei',
-              dataHoraInicio: dt, duracaoMinutos: 30,
-              pacienteNome: d.pacienteNome || 'Paciente', pacienteTelefone: phone,
-            });
-            console.log('Evento: ' + eid);
-            await criarAgendamento({
-              clinicaId: clinica.id, profissionalId: prof.id,
-              pacienteNome: d.pacienteNome || 'Paciente', pacienteTelefone: phone,
-              dataHora: dt, duracaoMinutos: 30, googleEventId: eid,
-            });
-            await limparConversa(clinica.id, phone);
-            console.log('Salvo');
+          // Google Calendar — optional
+          if (tokens) {
+            try {
+              configurarTokens({ access_token: tokens.access_token, refresh_token: tokens.refresh_token }, clinica.id);
+              var disponivel = await verificarSlotDisponivel(tokens.calendar_id, dt, duracao);
+              if (!disponivel) {
+                await enviarMensagem(phone, 'Ops! Esse horario acabou de ser ocupado 😕 Quer que eu te mostre outros horarios?', instanceName);
+                await salvarConversa(clinica.id, phone, {
+                  etapa: 'coletar_horario',
+                  dadosColetados: { ...resultado.contexto.dadosColetados, horario: undefined },
+                  historicoMensagens: resultado.contexto.historicoMensagens,
+                });
+                return; // Don't save, let patient pick another time
+              }
+              googleEventId = await criarEvento(tokens.calendar_id, {
+                titulo: prof.nome + ' — Consulta', descricao: 'Via Combinei',
+                dataHoraInicio: dt, duracaoMinutos: duracao,
+                pacienteNome: d.pacienteNome || 'Paciente', pacienteTelefone: phone,
+              });
+              console.log('Google Event: ' + googleEventId);
+            } catch (e: any) {
+              console.error('Calendar opcional:', e.message);
+            }
           }
+
+          // ALWAYS save to database
+          await criarAgendamento({
+            clinicaId: clinica.id, profissionalId: prof.id,
+            pacienteNome: d.pacienteNome || 'Paciente', pacienteTelefone: phone,
+            dataHora: dt, duracaoMinutos: duracao, googleEventId: googleEventId,
+          });
+          await limparConversa(clinica.id, phone);
+          console.log('Agendamento salvo!');
+        } else {
+          console.log('Nao encontrou prof ou data — prof:', !!prof, 'dt:', dt);
         }
-      } catch (e: any) { console.error('Calendar:', e.message); }
+      } catch (e: any) { console.error('Salvar agendamento:', e.message); }
     }
   } catch (e: any) { console.error('Webhook:', e.message); }
 });
