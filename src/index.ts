@@ -14,15 +14,22 @@ app.set('trust proxy', 1); // Railway reverse proxy — req.ip retorna IP real d
 
 // CORS
 const allowedOrigins = env.ALLOWED_ORIGINS.split(',').map(o => o.trim());
-app.use(cors({
-  origin: (origin, cb) => {
-    if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*')) return cb(null, true);
-    cb(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key'],
-}));
+// CORS only for browser requests - NOT for webhooks
+app.use((req, res, next) => {
+  // Webhook and health routes skip CORS
+  if (req.path === '/webhook' || req.path === '/health' || req.path === '/') {
+    return next();
+  }
+  cors({
+    origin: (origin, cb) => {
+      if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*')) return cb(null, true);
+      cb(new Error('Not allowed by CORS'));
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key'],
+  })(req, res, next);
+});
 
 app.use(express.json({ limit: '1mb' }));
 app.use((_req, res, next) => {
