@@ -49,18 +49,28 @@ export async function processarMensagem(
   ctx.historicoMensagens.push({ role: 'assistant', content: resposta });
 
   // Detect appointment conclusion - multiple phrases
+  // RISK 1 FIX: Only trigger if AI confirms AND we have minimum data (profissional + horario or data)
   const rl = resposta.toLowerCase();
-  if (
+  const hasConfirmPhrase = (
     rl.includes('combinei') || rl.includes('agendado') || rl.includes('agendada') ||
     rl.includes('combinado') || rl.includes('marcado') || rl.includes('marcada') ||
     rl.includes('com sucesso') || rl.includes('agendamento confirmado') ||
-    rl.includes('consulta confirmada') || rl.includes('tudo certo') || rl.includes('está confirmad')
-  ) {
+    rl.includes('consulta confirmada') || rl.includes('está confirmad')
+  );
+  // Must have profissional AND (date or time extracted from AI response)
+  const hasDate = !!resposta.match(/\d{2}\/\d{2}/);
+  const hasTime = !!resposta.match(/\d{1,2}:\d{2}/);
+  const hasProf = !!(ctx.dadosColetados.profissional);
+  const hasMinData = hasProf && (hasDate || hasTime);
+
+  if (hasConfirmPhrase && hasMinData) {
     ctx.etapa = 'agendamento_concluido';
     const timeMatch = resposta.match(/(\d{1,2}):(\d{2})/);
     if (timeMatch) ctx.dadosColetados.horario = timeMatch[1].padStart(2, '0') + ':' + timeMatch[2];
     const dateMatch = resposta.match(/(\d{2})\/(\d{2})/);
-    if (dateMatch) ctx.dadosColetados.data = `${new Date().getFullYear()}-${dateMatch[2].padStart(2, '0')}-${dateMatch[1].padStart(2, '0')}`;
+    // RISK 2 FIX: Use Brazil timezone for year
+    const brazilNow = new Date(Date.now() - 3 * 3600000);
+    if (dateMatch) ctx.dadosColetados.data = `${brazilNow.getFullYear()}-${dateMatch[2].padStart(2, '0')}-${dateMatch[1].padStart(2, '0')}`;
     logger.info('Agendamento detectado', { data: String(ctx.dadosColetados.data || ''), horario: String(ctx.dadosColetados.horario || ''), profissional: String(ctx.dadosColetados.profissional || ''), paciente: String(ctx.dadosColetados.pacienteNome || '') });
   }
 

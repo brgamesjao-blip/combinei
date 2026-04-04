@@ -4,7 +4,7 @@ export function buildSystemPrompt(clinica: Clinica, horarios: string, historico?
   var profs = clinica.profissionais.map(function(p) { return '- ' + p.nome + ' (' + p.especialidade + ')'; }).join('\n');
   var servs = clinica.servicos.map(function(s) { return '- ' + s.nome + ' (' + s.duracaoMinutos + ' min' + (s.preco ? ', R$' + s.preco : '') + ')'; }).join('\n');
   var horarioFunc = clinica.horarioFuncionamento.segunda ? clinica.horarioFuncionamento.segunda.inicio + ' às ' + clinica.horarioFuncionamento.segunda.fim : '08:00 às 18:00';
-  var hoje = new Date();
+  var hoje = new Date(Date.now() - 3 * 3600000); // Brazil timezone (UTC-3)
   var dataHoje = hoje.toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric' });
   var horaAgora = hoje.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
   var diasSemana = ['domingo','segunda-feira','terça-feira','quarta-feira','quinta-feira','sexta-feira','sábado'];

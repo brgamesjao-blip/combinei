@@ -10,6 +10,12 @@ import { clinicaCache, profsCache, servsCache } from '../utils/cache';
 
 const router = Router();
 
+// Brazil timezone helper — Railway runs in UTC, Brazil is UTC-3
+function getBrazilNow(): Date {
+  const now = new Date();
+  return new Date(now.getTime() - 3 * 3600000);
+}
+
 // Idempotency: deduplicate messages (5 min TTL)
 const processedMessages = new Map<string, number>();
 setInterval(() => { const cut = Date.now() - 300000; for (const [k, v] of processedMessages) { if (v < cut) processedMessages.delete(k); } }, 60000);
@@ -18,7 +24,9 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
   res.sendStatus(200);
   try {
     const body = req.body;
-    if (!body.event || body.event !== 'messages.upsert') return;
+    if (!body.event) return;
+    const evt = body.event.toLowerCase().replace(/_/g, '.');
+    if (evt !== 'messages.upsert') return;
     const data = body.data;
     if (!data?.key || data.key.fromMe) return;
 
@@ -27,7 +35,7 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
     if (messageId && processedMessages.has(messageId)) return;
     if (messageId) processedMessages.set(messageId, Date.now());
 
-    const instanceName = body.instance;
+    const instanceName = typeof body.instance === 'object' ? (body.instance?.instanceName || body.instance?.name || '') : (body.instance || '');
     const remoteJid = data.key.remoteJid || '';
     if (remoteJid.includes('@g.us')) return;
     const phone = remoteJid.replace('@s.whatsapp.net', '').replace('@c.us', '');
@@ -108,7 +116,7 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
     );
 
     // ── Filter folgas and occupied slots ──
-    const hoje = new Date();
+    const hoje = getBrazilNow();
     const hojeStr = hoje.toISOString().split('T')[0];
     const fimStr = new Date(hoje.getTime() + 14 * 86400000).toISOString().split('T')[0];
 
@@ -224,7 +232,7 @@ function gerarHorarios(ab?: string, fe?: string, ai?: string, af?: string, diasA
   const hAI = parseInt((ai || '12:00').split(':')[0]), hAF = parseInt((af || '13:00').split(':')[0]);
   const dias: HorarioDisponivel[] = [];
   const nomes = ['Domingo', 'Segunda', 'Terca', 'Quarta', 'Quinta', 'Sexta', 'Sabado'];
-  const hoje = new Date();
+  const hoje = getBrazilNow();
   for (let i = 1; i <= 14; i++) { // FIX #11: 14 dias em vez de 7
     const d = new Date(hoje.getTime() + i * 86400000);
     if (!diasAtend.includes(d.getDay())) continue; // Configurable working days!
@@ -262,7 +270,7 @@ function filtrarOcupadosMultiProf(horarios: HorarioDisponivel[], ocupados: any[]
 
 function resolverDataHora(data?: string, horario?: string): string | null {
   if (!horario && !data) return null;
-  const hoje = new Date();
+  const hoje = getBrazilNow();
   let alvo: Date | null = null;
   if (!data) alvo = new Date(hoje.getTime() + 86400000);
   else if (data.match(/^\d{4}-\d{2}-\d{2}$/)) alvo = new Date(data + 'T12:00:00');
