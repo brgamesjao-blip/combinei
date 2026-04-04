@@ -10,13 +10,18 @@ import notificationRoutes from './notifications/routes';
 import exportRoutes from './export/routes';
 
 const app = express();
-app.set('trust proxy', 1); // Railway reverse proxy — req.ip retorna IP real do cliente
+app.set('trust proxy', 1);
 
-// CORS
+app.use(express.json({ limit: '1mb' }));
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  next();
+});
+
+// CORS - skip for webhook and health routes
 const allowedOrigins = env.ALLOWED_ORIGINS.split(',').map(o => o.trim());
-// CORS only for browser requests - NOT for webhooks
 app.use((req, res, next) => {
-  // Webhook and health routes skip CORS
   if (req.path === '/webhook' || req.path === '/health' || req.path === '/') {
     return next();
   }
@@ -29,13 +34,6 @@ app.use((req, res, next) => {
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key'],
   })(req, res, next);
-});
-
-app.use(express.json({ limit: '1mb' }));
-app.use((_req, res, next) => {
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
-  next();
 });
 
 // Health

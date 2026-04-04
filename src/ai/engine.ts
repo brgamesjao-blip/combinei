@@ -6,7 +6,6 @@ import { logger } from '../utils/logger';
 import { withCircuitBreaker } from '../utils/circuitBreaker';
 
 const anthropic = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
-
 const FALLBACK_MSG = 'Desculpa, estou com um probleminha técnico. Pode tentar de novo em alguns minutos?';
 
 export async function processarMensagem(
@@ -26,15 +25,8 @@ export async function processarMensagem(
   if (dados.periodo) ctx.dadosColetados.periodo = dados.periodo;
   if (dados.pacienteNome) ctx.dadosColetados.pacienteNome = dados.pacienteNome;
 
-  // Detect handoff intent BEFORE calling AI
-  if (dados.intencao === 'falar_humano') {
-    ctx.etapa = 'handoff_humano';
-  }
-
-  // Detect cancel intent
-  if (dados.intencao === 'cancelar') {
-    ctx.etapa = 'cancelamento_solicitado';
-  }
+  if (dados.intencao === 'falar_humano') ctx.etapa = 'handoff_humano';
+  if (dados.intencao === 'cancelar') ctx.etapa = 'cancelamento_solicitado';
 
   const horariosTexto = (ctx.horariosOferecidos || [])
     .map((h: HorarioDisponivel) => `${h.diaSemana} ${h.data}: ${h.horarios.join(', ')}`)
@@ -42,7 +34,6 @@ export async function processarMensagem(
 
   ctx.historicoMensagens.push({ role: 'user', content: msg });
 
-  // Circuit breaker around Anthropic API
   const resposta = await withCircuitBreaker<string>('anthropic-chat', async () => {
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
@@ -57,24 +48,30 @@ export async function processarMensagem(
 
   ctx.historicoMensagens.push({ role: 'assistant', content: resposta });
 
-  // Detect conclusion from AI response
-  if (resposta.toLowerCase().includes('combinei!')) {
+  // Detect appointment conclusion - multiple phrases
+  const rl = resposta.toLowerCase();
+  if (
+    rl.includes('combinei') || rl.includes('agendado') || rl.includes('agendada') ||
+    rl.includes('combinado') || rl.includes('marcado') || rl.includes('marcada') ||
+    rl.includes('com sucesso') || rl.includes('agendamento confirmado') ||
+    rl.includes('consulta confirmada') || rl.includes('tudo certo') || rl.includes('está confirmad')
+  ) {
     ctx.etapa = 'agendamento_concluido';
     const timeMatch = resposta.match(/(\d{1,2}):(\d{2})/);
     if (timeMatch) ctx.dadosColetados.horario = timeMatch[1].padStart(2, '0') + ':' + timeMatch[2];
     const dateMatch = resposta.match(/(\d{2})\/(\d{2})/);
     if (dateMatch) ctx.dadosColetados.data = `${new Date().getFullYear()}-${dateMatch[2].padStart(2, '0')}-${dateMatch[1].padStart(2, '0')}`;
+    logger.info('Agendamento detectado', { data: String(ctx.dadosColetados.data || ''), horario: String(ctx.dadosColetados.horario || ''), profissional: String(ctx.dadosColetados.profissional || ''), paciente: String(ctx.dadosColetados.pacienteNome || '') });
   }
 
   return { resposta, contexto: ctx };
 }
 
-/** Uses Haiku (cheaper/faster) for structured data extraction */
 async function extrairDados(msg: string): Promise<DadosExtraidos> {
   try {
     const r = await withCircuitBreaker('anthropic-extract', async () => {
       return anthropic.messages.create({
-        model: 'claude-haiku-4-5-20251001',  // Haiku = 10x cheaper for extraction
+        model: 'claude-haiku-4-5-20251001',
         max_tokens: 300,
         system: buildExtractionPrompt(),
         messages: [{ role: 'user', content: msg }],
@@ -92,4 +89,3 @@ async function extrairDados(msg: string): Promise<DadosExtraidos> {
 export function criarContextoInicial(clinica: Clinica): ContextoConversa {
   return { clinica, etapa: 'inicio', dadosColetados: {}, horariosOferecidos: [], historicoMensagens: [] };
 }
-

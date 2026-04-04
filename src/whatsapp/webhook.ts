@@ -18,9 +18,7 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
   res.sendStatus(200);
   try {
     const body = req.body;
-    logger.info('Webhook raw', { event: body.event, instance: typeof body.instance === 'object' ? JSON.stringify(body.instance) : body.instance, hasData: !!body.data });
-    const evt = (body.event || '').toLowerCase().replace(/_/g, '.');
-    if (evt !== 'messages.upsert') return;
+    if (!body.event || body.event !== 'messages.upsert') return;
     const data = body.data;
     if (!data?.key || data.key.fromMe) return;
 
@@ -29,7 +27,7 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
     if (messageId && processedMessages.has(messageId)) return;
     if (messageId) processedMessages.set(messageId, Date.now());
 
-    const instanceName = typeof body.instance === 'object' ? (body.instance.instanceName || body.instance.name) : body.instance;
+    const instanceName = body.instance;
     const remoteJid = data.key.remoteJid || '';
     if (remoteJid.includes('@g.us')) return;
     const phone = remoteJid.replace('@s.whatsapp.net', '').replace('@c.us', '');
@@ -181,20 +179,36 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
     if (resultado.contexto.etapa === 'agendamento_concluido') {
       try {
         const d = resultado.contexto.dadosColetados;
-        const prof = clinica.profissionais.find(p => {
+        logger.info('AGENDAMENTO INICIANDO', { profissional: String(d.profissional || ''), data: String(d.data || ''), horario: String(d.horario || ''), paciente: String(d.pacienteNome || ''), profsDB: clinica.profissionais.map(p => p.nome).join(', ') });
+
+        let prof = clinica.profissionais.find(p => {
           const np = p.nome.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
           const b = (d.profissional || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+          if (!b) return false;
           if (np.includes(b) || b.includes(np)) return true;
           const words = b.replace(/^(doutora?|dra?\.?|doutor|dr\.?)\s*/i, '').split(/\s+/).filter(Boolean);
           return words.length > 0 && words.every(w => np.includes(w));
         });
+        // Fallback: if only 1 professional exists, use them
+        if (!prof && clinica.profissionais.length === 1) prof = clinica.profissionais[0];
+        // Fallback: if profissional name partially matches any
+        if (!prof && d.profissional) {
+          const bWords = (d.profissional || '').toLowerCase().replace(/^(doutora?|dra?\.?|doutor|dr\.?)\s*/i, '').split(/\s+/).filter(Boolean);
+          prof = clinica.profissionais.find(p => bWords.some(w => p.nome.toLowerCase().includes(w)));
+        }
+
         const serv = clinica.servicos.find(s => (d.servico || '').toLowerCase().includes(s.nome.toLowerCase()));
         const duracao = serv ? serv.duracaoMinutos : (clinica.servicos[0]?.duracaoMinutos || 30);
         const dt = resolverDataHora(d.data, d.horario);
+
+        logger.info('AGENDAMENTO RESOLVE', { dt: String(dt || 'NULL'), profFound: !!prof, profNome: String(prof?.nome || 'NONE') });
+
         if (dt && prof) {
           await criarAgendamento({ clinicaId: clinica.id, profissionalId: prof.id, pacienteNome: d.pacienteNome || 'Paciente', pacienteTelefone: phone, dataHora: dt, duracaoMinutos: duracao });
           await limparConversa(clinica.id, phone);
-          logger.info('Agendamento salvo', { clinica: clinica.nome });
+          logger.info('Agendamento salvo', { clinica: clinica.nome, prof: prof.nome, dt });
+        } else {
+          logger.warn('AGENDAMENTO FALHOU', { dtNull: !dt, profNull: !prof, data: String(d.data || ''), horario: String(d.horario || ''), profissional: String(d.profissional || '') });
         }
       } catch (e) { logger.error('Erro agendamento', { error: (e as Error).message }); }
     }
