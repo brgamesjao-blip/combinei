@@ -92,3 +92,4 @@ async function extrairDados(msg: string): Promise<DadosExtraidos> {
 export function criarContextoInicial(clinica: Clinica): ContextoConversa {
   return { clinica, etapa: 'inicio', dadosColetados: {}, horariosOferecidos: [], historicoMensagens: [] };
 }
+
