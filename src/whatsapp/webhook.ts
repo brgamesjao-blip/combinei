@@ -18,7 +18,9 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
   res.sendStatus(200);
   try {
     const body = req.body;
-    if (!body.event || body.event !== 'messages.upsert') return;
+    logger.info('Webhook raw', { event: body.event, instance: typeof body.instance === 'object' ? JSON.stringify(body.instance) : body.instance, hasData: !!body.data });
+    const evt = (body.event || '').toLowerCase().replace(/_/g, '.');
+    if (evt !== 'messages.upsert') return;
     const data = body.data;
     if (!data?.key || data.key.fromMe) return;
 
@@ -27,7 +29,7 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
     if (messageId && processedMessages.has(messageId)) return;
     if (messageId) processedMessages.set(messageId, Date.now());
 
-    const instanceName = body.instance;
+    const instanceName = typeof body.instance === 'object' ? (body.instance.instanceName || body.instance.name) : body.instance;
     const remoteJid = data.key.remoteJid || '';
     if (remoteJid.includes('@g.us')) return;
     const phone = remoteJid.replace('@s.whatsapp.net', '').replace('@c.us', '');
