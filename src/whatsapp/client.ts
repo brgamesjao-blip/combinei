@@ -1,34 +1,55 @@
 import { env } from '../config/env';
 import { supabase } from '../db/client';
+import { logger } from '../utils/logger';
 
-export async function enviarMensagem(para: string, texto: string, instanceName?: string) {
+const MAX_RETRIES = 2;
+const RETRY_DELAY_MS = 1000;
+
+export async function enviarMensagem(para: string, texto: string, instanceName?: string): Promise<boolean> {
   if (!env.EVOLUTION_API_URL) {
-    console.log('[EVO STUB] -> ' + para + ': ' + texto);
-    return;
+    logger.debug('EVO STUB', { phone: para, message: texto });
+    return true;
   }
 
-  var instance = instanceName;
+  let instance = instanceName;
   if (!instance) {
-    var { data: clinica } = await supabase.from('clinicas').select('phone_number_id').eq('ativa', true).limit(1).single();
+    const { data: clinica } = await supabase
+      .from('clinicas').select('phone_number_id')
+      .eq('ativa', true).limit(1).single();
     instance = clinica?.phone_number_id || 'default';
   }
 
-  var numero = para.replace(/\D/g, '');
+  const numero = para.replace(/\D/g, '');
 
-  var r = await fetch(env.EVOLUTION_API_URL + '/message/sendText/' + instance, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'apikey': env.EVOLUTION_API_KEY },
-    body: JSON.stringify({ number: numero, text: texto }),
-  });
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch(
+        `${env.EVOLUTION_API_URL}/message/sendText/${instance}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', apikey: env.EVOLUTION_API_KEY },
+          body: JSON.stringify({ number: numero, text: texto }),
+        }
+      );
 
-  if (!r.ok) {
-    var err = await r.text();
-    console.error('Erro Evolution:', err);
-  } else {
-    console.log('Enviado pra ' + para);
+      if (response.ok) {
+        logger.info('Mensagem enviada', { phone: para, instance });
+        return true;
+      }
+
+      const errorText = await response.text();
+      logger.warn('Erro Evolution API', { status: response.status, attempt: attempt + 1, error: errorText.substring(0, 100) });
+
+      if (response.status >= 400 && response.status < 500) return false;
+    } catch (err) {
+      logger.error('Falha de rede Evolution', { phone: para, attempt: attempt + 1, error: (err as Error).message });
+    }
+
+    if (attempt < MAX_RETRIES) {
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * (attempt + 1)));
+    }
   }
-}
 
-export async function marcarComoLida(messageId: string, phone: string) {
-  // Evolution API marca como lida automaticamente
+  logger.error('Todas as tentativas falharam', { phone: para });
+  return false;
 }

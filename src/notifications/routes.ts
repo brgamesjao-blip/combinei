@@ -1,92 +1,73 @@
-import { Router } from 'express';
-import { supabase } from '../db/client';
+import { Router, Request, Response } from 'express';
+import { supabase, limparConversasAntigas } from '../db/client';
 import { enviarMensagem } from '../whatsapp/client';
+import { requireApiKey } from '../middleware/auth';
+import { logger } from '../utils/logger';
+import { env } from '../config/env';
 
-var router = Router();
+const router = Router();
 
-// Cron endpoint — call every hour to send pending reminders
-// Railway Cron or external service calls GET /api/notifications/process
-router.get('/api/notifications/process', async function(req, res) {
+/** Send 24h reminder notifications. Call via external cron every hour. */
+router.get('/api/notifications/process', requireApiKey, async (_req: Request, res: Response) => {
   try {
-    var agora = new Date();
-    var em24h = new Date(agora.getTime() + 24 * 3600000);
-    var em23h = new Date(agora.getTime() + 23 * 3600000);
+    const agora = new Date();
+    const em24h = new Date(agora.getTime() + 24 * 3600000);
+    const em23h = new Date(agora.getTime() + 23 * 3600000);
 
-    // Find appointments in next 23-24 hours that haven't been notified
-    var { data: agendamentos } = await supabase.from('agendamentos')
+    const { data: ags } = await supabase.from('agendamentos')
       .select('*, profissionais(nome), clinicas(nome, phone_number_id, bot_nome)')
-      .eq('status', 'confirmado')
-      .gte('data_hora', em23h.toISOString())
-      .lte('data_hora', em24h.toISOString());
+      .eq('status', 'confirmado').gte('data_hora', em23h.toISOString()).lte('data_hora', em24h.toISOString());
 
-    if (!agendamentos || agendamentos.length === 0) {
-      res.json({ sent: 0 });
-      return;
-    }
+    if (!ags || ags.length === 0) { res.json({ sent: 0 }); return; }
 
-    var enviados = 0;
+    let enviados = 0;
+    for (const a of ags) {
+      const { data: ex } = await supabase.from('notificacoes').select('id')
+        .eq('agendamento_id', a.id).eq('tipo', 'lembrete_24h').eq('enviado', true).limit(1);
+      if (ex && ex.length > 0) continue;
 
-    for (var i = 0; i < agendamentos.length; i++) {
-      var a = agendamentos[i];
+      const bn = (a.clinicas as any)?.bot_nome || 'Bia';
+      const cn = (a.clinicas as any)?.nome || 'Clínica';
+      const inst = (a.clinicas as any)?.phone_number_id;
+      if (!inst || !a.paciente_telefone) continue;
 
-      // Check if already notified
-      var { data: existing } = await supabase.from('notificacoes')
-        .select('id')
-        .eq('agendamento_id', a.id)
-        .eq('tipo', 'lembrete_24h')
-        .eq('enviado', true)
-        .limit(1);
-
-      if (existing && existing.length > 0) continue;
-
-      var botNome = (a.clinicas as any)?.bot_nome || 'Bia';
-      var clinicaNome = (a.clinicas as any)?.nome || 'Clínica';
-      var instanceName = (a.clinicas as any)?.phone_number_id;
-      if (!instanceName || !a.paciente_telefone) continue;
-
-      var dtStr = a.data_hora ? a.data_hora.substring(0, 10) : '';
-      var hrStr = a.data_hora ? a.data_hora.substring(11, 16) : '';
-      var profNome = (a.profissionais as any)?.nome || 'profissional';
-
-      var msg = 'Oi! Aqui é a ' + botNome + ' da ' + clinicaNome + ' 😊\n\n' +
-        'Passando pra lembrar que você tem consulta amanhã:\n\n' +
-        '👨‍⚕️ ' + profNome + '\n' +
-        '📅 ' + dtStr.split('-').reverse().join('/') + '\n' +
-        '⏰ ' + hrStr + '\n\n' +
-        'Vai poder comparecer? Responda SIM pra confirmar ou NÃO pra cancelar.';
+      const dt = a.data_hora?.substring(0, 10) || '';
+      const hr = a.data_hora?.substring(11, 16) || '';
+      const pn = (a.profissionais as any)?.nome || '';
+      const msg = `Oi! Aqui é a ${bn} da ${cn}\n\nLembrete da sua consulta amanhã:\n${pn}\n${dt.split('-').reverse().join('/')}\n${hr}\n\nVai poder comparecer? Responda SIM ou NÃO.`;
 
       try {
-        await enviarMensagem(a.paciente_telefone, msg, instanceName);
-
+        const sent = await enviarMensagem(a.paciente_telefone, msg, inst);
         await supabase.from('notificacoes').insert({
-          clinica_id: a.clinica_id,
-          agendamento_id: a.id,
-          tipo: 'lembrete_24h',
-          telefone: a.paciente_telefone,
-          mensagem: msg,
-          enviado: true,
-          enviado_at: new Date().toISOString(),
+          clinica_id: a.clinica_id, agendamento_id: a.id, tipo: 'lembrete_24h',
+          telefone: a.paciente_telefone, mensagem: msg, enviado: sent,
+          enviado_at: sent ? new Date().toISOString() : null,
         });
-
-        enviados++;
-        console.log('Lembrete enviado: ' + a.paciente_nome + ' - ' + profNome);
-      } catch (e: any) {
-        console.error('Erro notificação:', e.message);
+        if (sent) enviados++;
+      } catch (e) {
         await supabase.from('notificacoes').insert({
-          clinica_id: a.clinica_id,
-          agendamento_id: a.id,
-          tipo: 'lembrete_24h',
-          telefone: a.paciente_telefone,
-          mensagem: msg,
-          enviado: false,
+          clinica_id: a.clinica_id, agendamento_id: a.id, tipo: 'lembrete_24h',
+          telefone: a.paciente_telefone, mensagem: msg, enviado: false,
         });
       }
     }
+    res.json({ sent: enviados, total: ags.length });
+  } catch (e) {
+    logger.error('Notifications error', { error: (e as Error).message });
+    res.status(500).json({ error: 'Erro' });
+  }
+});
 
-    res.json({ sent: enviados, total: agendamentos.length });
-  } catch (e: any) {
-    console.error('Notifications error:', e.message);
-    res.status(500).json({ error: e.message });
+/** Cleanup stale conversations. Call via cron every 6 hours. */
+router.get('/api/cleanup/conversas', requireApiKey, async (_req: Request, res: Response) => {
+  try {
+    const hours = env.CONVERSATION_TIMEOUT_HOURS;
+    const cleaned = await limparConversasAntigas(hours);
+    logger.info('Conversas limpas', { cleaned, hoursOld: hours });
+    res.json({ cleaned, hoursThreshold: hours });
+  } catch (e) {
+    logger.error('Cleanup error', { error: (e as Error).message });
+    res.status(500).json({ error: 'Erro' });
   }
 });
 

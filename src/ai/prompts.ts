@@ -257,6 +257,7 @@ export function buildExtractionPrompt(): string {
 '- "remarcar", "trocar dia", "mudar horário", "adiar" → "remarcar"\n' +
 '- "que horas tem", "quais horários", "tem vaga" → "consultar_horarios"\n' +
 '- "quanto custa", "qual valor", "preço" → "duvida"\n' +
+'- "quero falar com alguém", "atendente", "humano", "pessoa real", "falar com vocês" → "falar_humano"\n' +
 '- Qualquer outra coisa → "outro"\n\n' +
 
 '═══ REGRAS DE HORÁRIO (CRÍTICO) ═══\n' +

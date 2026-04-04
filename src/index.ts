@@ -1,32 +1,54 @@
 import express from 'express';
 import cors from 'cors';
 import { env } from './config/env';
+import { errorHandler } from './middleware/errorHandler';
+import { logger } from './utils/logger';
 import whatsappWebhook from './whatsapp/webhook';
 import onboardingRoutes from './onboarding/routes';
 import evolutionRoutes from './evolution/routes';
 import notificationRoutes from './notifications/routes';
+import exportRoutes from './export/routes';
 
-var app = express();
-app.use(cors());
-app.use(express.json());
+const app = express();
+app.set('trust proxy', 1); // Railway reverse proxy — req.ip retorna IP real do cliente
 
-app.get('/', function(_, res) { res.json({ name: 'Combinei Bot', status: 'online', v: '4.1' }); });
+// CORS
+const allowedOrigins = env.ALLOWED_ORIGINS.split(',').map(o => o.trim());
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*')) return cb(null, true);
+    cb(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key'],
+}));
 
+app.use(express.json({ limit: '1mb' }));
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  next();
+});
+
+// Health
+app.get('/', (_req, res) => { res.json({ name: 'Combinei Bot', status: 'online', v: '6.0' }); });
+app.get('/health', async (_req, res) => {
+  try {
+    const { supabase } = await import('./db/client');
+    const { error } = await supabase.from('clinicas').select('id').limit(1);
+    res.json({ status: 'healthy', db: error ? 'error' : 'ok', ts: new Date().toISOString() });
+  } catch { res.status(503).json({ status: 'unhealthy' }); }
+});
+
+// Routes
 app.use(whatsappWebhook);
 app.use(onboardingRoutes);
 app.use(evolutionRoutes);
 app.use(notificationRoutes);
+app.use(exportRoutes);
 
-var port = Number(env.PORT) || 3000;
-app.listen(port, '0.0.0.0', function() {
-  console.log('Combinei Bot v4.1 rodando na porta ' + port);
+app.use(errorHandler);
 
-  // Auto-check notifications every hour
-  setInterval(async function() {
-    try {
-      var r = await fetch('http://localhost:' + port + '/api/notifications/process');
-      var d = await r.json();
-     if ((d as any).sent > 0) console.log('Notificacoes enviadas: ' + (d as any).sent);
-    } catch(e) {}
-  }, 3600000);
-});
+const port = Number(env.PORT) || 3000;
+app.listen(port, '0.0.0.0', () => { logger.info('Server started', { port, env: env.NODE_ENV }); });

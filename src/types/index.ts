@@ -11,6 +11,7 @@ export interface Clinica {
   msgCancelamento: string | null;
   msgForaHorario: string | null;
   msgSemHorario: string | null;
+  diasAtendimento?: number[]; // 0=dom, 1=seg ... 6=sab. Default [1,2,3,4,5]
 }
 
 export interface Profissional {
@@ -40,7 +41,7 @@ export interface HorarioDisponivel {
 export type Intencao =
   | 'agendar' | 'remarcar' | 'cancelar'
   | 'consultar_horarios' | 'saudacao'
-  | 'duvida' | 'agradecimento' | 'outro';
+  | 'duvida' | 'agradecimento' | 'falar_humano' | 'outro';
 
 export interface DadosExtraidos {
   intencao: Intencao;
