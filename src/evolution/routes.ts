@@ -35,15 +35,11 @@ router.post('/evolution/create-instance', requireAuth, evolutionLimiter, async (
     const { data: cl } = await supabase.from('clinicas').select('id').eq('id', clinicaId).eq('user_id', req.userId).single();
     if (!cl) { res.status(403).json({ error: 'Sem permissão' }); return; }
 
-    // Delete old instance if exists
-    try {
-      await fetch(`${env.EVOLUTION_API_URL}/instance/delete/${safeName}`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json', 'apikey': env.EVOLUTION_API_KEY },
-      });
-    } catch {}
-
-    await new Promise(r => setTimeout(r, 2000));
+    // Delete old instance if exists (fire-and-forget, don't wait)
+    fetch(`${env.EVOLUTION_API_URL}/instance/delete/${safeName}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', 'apikey': env.EVOLUTION_API_KEY },
+    }).catch(() => {});
 
     // Create new instance WITH webhook auth
     const createResponse = await fetch(`${env.EVOLUTION_API_URL}/instance/create`, {
@@ -58,20 +54,18 @@ router.post('/evolution/create-instance', requireAuth, evolutionLimiter, async (
     });
     const data = await createResponse.json();
 
-    // Also explicitly set webhook (belt + suspenders)
-    try {
-      await fetch(`${env.EVOLUTION_API_URL}/webhook/set/${safeName}`, {
+    // Webhook set + clinic update in parallel (independent operations)
+    await Promise.all([
+      fetch(`${env.EVOLUTION_API_URL}/webhook/set/${safeName}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'apikey': env.EVOLUTION_API_KEY },
         body: JSON.stringify({ webhook: buildWebhookConfig() }),
-      });
-    } catch {}
-
-    // Update clinic record
-    await supabase.from('clinicas').update({
-      phone_number_id: safeName,
-      whatsapp_token: 'evolution',
-    }).eq('id', clinicaId);
+      }).catch(() => {}),
+      supabase.from('clinicas').update({
+        phone_number_id: safeName,
+        whatsapp_token: 'evolution',
+      }).eq('id', clinicaId),
+    ]);
 
     logger.info('Instância criada', { instance: safeName, clinicaId });
     res.json({ success: true, instance: data });
