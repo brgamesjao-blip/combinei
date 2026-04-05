@@ -23,7 +23,7 @@ export class TtlCache<T> {
   clear(): void { this.store.clear(); }
 }
 
-// Global caches
-export const clinicaCache = new TtlCache<any>(300);   // 5 min
-export const profsCache = new TtlCache<any[]>(300);
-export const servsCache = new TtlCache<any[]>(300);
+// Global caches — 60s TTL balances freshness (clinic setting changes) with DB load
+export const clinicaCache = new TtlCache<any>(60);
+export const profsCache = new TtlCache<any[]>(60);
+export const servsCache = new TtlCache<any[]>(60);

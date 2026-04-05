@@ -435,8 +435,24 @@ function resolverDataHora(data?: string, horario?: string): string | null {
   let alvo: Date | null = null;
   if (!data) alvo = new Date(hoje.getTime() + 86400000);
   else if (data.match(/^\d{4}-\d{2}-\d{2}$/)) alvo = new Date(data + 'T12:00:00');
-  else if (data.match(/\d{2}\/\d{2}/)) { const m = data.match(/(\d{2})\/(\d{2})/); if (m) alvo = new Date(hoje.getFullYear(), +m[2] - 1, +m[1]); }
-  else if (data.match(/dia\s*(\d{1,2})/i)) { const m = data.match(/dia\s*(\d{1,2})/i); if (m) { alvo = new Date(hoje.getFullYear(), hoje.getMonth(), +m[1]); if (alvo <= hoje) alvo.setMonth(alvo.getMonth() + 1); } }
+  else if (data.match(/\d{2}\/\d{2}/)) {
+    const m = data.match(/(\d{2})\/(\d{2})/);
+    if (m) {
+      alvo = new Date(hoje.getFullYear(), +m[2] - 1, +m[1]);
+      // Compare by date only (not time) — same-day requests shouldn't bump
+      const hojeDate = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate());
+      if (alvo < hojeDate) alvo.setFullYear(alvo.getFullYear() + 1);
+    }
+  }
+  else if (data.match(/dia\s*(\d{1,2})/i)) {
+    const m = data.match(/dia\s*(\d{1,2})/i);
+    if (m) {
+      alvo = new Date(hoje.getFullYear(), hoje.getMonth(), +m[1]);
+      // Compare by date only (not time) — same-day requests shouldn't bump
+      const hojeDate = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate());
+      if (alvo < hojeDate) alvo.setMonth(alvo.getMonth() + 1);
+    }
+  }
   else {
     const map: Record<string, number> = { domingo: 0, segunda: 1, terca: 2, 'terça': 2, quarta: 3, quinta: 4, sexta: 5, sabado: 6, 'sábado': 6 };
     const dl = data.toLowerCase().replace(/[\s-]?feira/, '').trim();
