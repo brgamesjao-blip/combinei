@@ -221,17 +221,19 @@ async function processarLote(phone: string, texts: string[], instanceName: strin
     ctx.horariosOferecidos = filtrarOcupadosMultiProf(ctx.horariosOferecidos, ocupadosR, clinica.profissionais.length);
   }
 
-  // Patient history — mark future vs past so AI knows if patient already has an appointment
+  // Patient history — mark future vs past vs cancelled so AI knows actual state
   let hist: string | undefined;
   const antigos = antigosR.data || [];
   if (antigos.length > 0) {
     const nowMs = Date.now();
     hist = antigos.map((a: any) => {
       const dt = new Date(a.data_hora);
-      const isFuture = dt.getTime() > nowMs && a.status === 'confirmado';
       const dateStr = dt.toLocaleDateString('pt-BR');
       const timeStr = dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-      const tag = isFuture ? '[AGENDADO FUTURO]' : '[PASSADO]';
+      let tag: string;
+      if (a.status === 'cancelado') tag = '[CANCELADO]';
+      else if (dt.getTime() > nowMs && a.status === 'confirmado') tag = '[AGENDADO FUTURO]';
+      else tag = '[PASSADO]';
       return `- ${tag} ${a.paciente_nome || 'Paciente'} com ${(a.profissionais as any)?.nome || '?'} em ${dateStr} às ${timeStr}`;
     }).join('\n');
   }
@@ -249,6 +251,28 @@ async function processarLote(phone: string, texts: string[], instanceName: strin
 
   // ── Process with AI ──
   const resultado = await processarMensagem(texto, ctx, histFinal || undefined);
+
+  // Guard: if AI returned empty response, use fallback to avoid sending empty message
+  if (!resultado.resposta || resultado.resposta.trim().length === 0) {
+    logger.warn('Resposta vazia do AI, usando fallback', { phone });
+    resultado.resposta = 'Desculpa, tive um probleminha aqui. Pode repetir?';
+  }
+
+  // If AI confirmed an appointment, extract the ACTUAL prof name from response
+  // (protects against stale/wrong profissional in dadosColetados)
+  if (resultado.contexto.etapa === 'agendamento_concluido') {
+    const respNormalized = resultado.resposta.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const matchedProf = clinica.profissionais.find(p => {
+      const np = p.nome.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      if (respNormalized.includes(np)) return true;
+      // Try individual words (e.g. response says "Ana" for "Dra. Ana Silva")
+      const words = np.replace(/^(doutora?|dra?\.?|doutor|dr\.?)\s*/, '').split(/\s+/).filter(w => w.length > 2);
+      return words.length > 0 && words.some(w => respNormalized.includes(w));
+    });
+    if (matchedProf) {
+      resultado.contexto.dadosColetados.profissional = matchedProf.nome;
+    }
+  }
 
   // ── Handle special states AFTER AI response ──
 
