@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git config:*)",
+      "Bash(ls -la C:/Users/Juann/Downloads/combinei-bot/*.md C:/Users/Juann/Downloads/combinei-bot/*.MD)",
+      "Bash(ls -la C:/Users/Juann/Downloads/combinei-bot/README* C:/Users/Juann/Downloads/combinei-bot/CLAUDE*)",
+      "Bash(npx tsc:*)"
+    ]
+  }
+}

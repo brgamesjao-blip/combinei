@@ -170,6 +170,7 @@ async function processarLote(phone: string, texts: string[], instanceName: strin
   // ── Load conversation state ──
   const salva = await buscarConversa(clinica.id, phone);
   const ctx = criarContextoInicial(clinica);
+  let staleNote = '';
   if (salva) {
     if (salva.etapa === 'handoff_humano') {
       logger.info('Conversa em handoff, ignorando bot', { phone });
@@ -179,12 +180,12 @@ async function processarLote(phone: string, texts: string[], instanceName: strin
     ctx.dadosColetados = salva.dadosColetados;
     ctx.historicoMensagens = salva.historicoMensagens;
 
-    // Detect stale conversation (gap > 2 hours) — tell AI to greet again
+    // Detect stale conversation (gap > 2 hours) — note goes in system prompt, not in message history
     if (salva.updatedAt) {
       const gap = Date.now() - new Date(salva.updatedAt).getTime();
       if (gap > 2 * 3600000) {
         const hoursAgo = Math.floor(gap / 3600000);
-        texto = `[SISTEMA: O paciente voltou após ${hoursAgo}h sem responder. Cumprimente novamente e pergunte se quer continuar o agendamento anterior ou começar de novo.]\n${texto}`;
+        staleNote = `ATENÇÃO: O paciente voltou após ${hoursAgo}h sem responder. Cumprimente novamente e pergunte se quer continuar o agendamento anterior ou começar de novo.`;
         logger.info('Conversa retomada após gap', { phone, hoursAgo });
       }
     }
@@ -220,15 +221,26 @@ async function processarLote(phone: string, texts: string[], instanceName: strin
     ctx.horariosOferecidos = filtrarOcupadosMultiProf(ctx.horariosOferecidos, ocupadosR, clinica.profissionais.length);
   }
 
-  // Patient history
+  // Patient history — mark future vs past so AI knows if patient already has an appointment
   let hist: string | undefined;
   const antigos = antigosR.data || [];
   if (antigos.length > 0) {
-    hist = antigos.map((a: any) => `- ${a.paciente_nome || 'Paciente'} com ${(a.profissionais as any)?.nome || '?'} em ${new Date(a.data_hora).toLocaleDateString('pt-BR')}`).join('\n');
+    const nowMs = Date.now();
+    hist = antigos.map((a: any) => {
+      const dt = new Date(a.data_hora);
+      const isFuture = dt.getTime() > nowMs && a.status === 'confirmado';
+      const dateStr = dt.toLocaleDateString('pt-BR');
+      const timeStr = dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+      const tag = isFuture ? '[AGENDADO FUTURO]' : '[PASSADO]';
+      return `- ${tag} ${a.paciente_nome || 'Paciente'} com ${(a.profissionais as any)?.nome || '?'} em ${dateStr} às ${timeStr}`;
+    }).join('\n');
   }
 
-  // ── Use WhatsApp profile name if available ──
+  // ── Build additional context (stale note, pushName) for system prompt ──
   let histFinal = hist || '';
+  if (staleNote) {
+    histFinal = staleNote + (histFinal ? '\n\n' + histFinal : '');
+  }
   if (pushName && !ctx.dadosColetados.pacienteNome) {
     histFinal = (histFinal ? histFinal + '\n\n' : '') +
       'Nome no perfil do WhatsApp deste paciente: ' + pushName +
@@ -317,7 +329,9 @@ async function processarLote(phone: string, texts: string[], instanceName: strin
           await enviarMensagem(phone, 'Ops, esse horário acabou de ser preenchido por outro paciente! Pode escolher outro horário?', instanceName);
         }
       } else {
+        // Invalid prof/date — don't leave patient thinking they're booked
         logger.warn('AGENDAMENTO FALHOU', { dtNull: !dt, profNull: !prof, data: String(d.data || ''), horario: String(d.horario || ''), profissional: String(d.profissional || '') });
+        await enviarMensagem(phone, 'Ops, tive um probleminha pra registrar seu agendamento. Pode me confirmar de novo o nome do profissional e o horário?', instanceName);
       }
     } catch (e) { logger.error('Erro agendamento', { error: (e as Error).message }); }
   }
@@ -401,7 +415,7 @@ function resolverDataHora(data?: string, horario?: string): string | null {
   else if (data.match(/dia\s*(\d{1,2})/i)) { const m = data.match(/dia\s*(\d{1,2})/i); if (m) { alvo = new Date(hoje.getFullYear(), hoje.getMonth(), +m[1]); if (alvo <= hoje) alvo.setMonth(alvo.getMonth() + 1); } }
   else {
     const map: Record<string, number> = { domingo: 0, segunda: 1, terca: 2, 'terça': 2, quarta: 3, quinta: 4, sexta: 5, sabado: 6, 'sábado': 6 };
-    const dl = data.toLowerCase().replace('-feira', '').trim();
+    const dl = data.toLowerCase().replace(/[\s-]?feira/, '').trim();
     if (dl === 'amanha' || dl === 'amanhã') alvo = new Date(hoje.getTime() + 86400000);
     else if (dl === 'depois de amanha' || dl === 'depois de amanhã') alvo = new Date(hoje.getTime() + 2 * 86400000);
     else if (dl === 'hoje') alvo = new Date(hoje);

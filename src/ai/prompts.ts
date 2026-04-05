@@ -3,7 +3,9 @@ import { Clinica } from '../types';
 export function buildSystemPrompt(clinica: Clinica, horarios: string, historico?: string): string {
   var profs = clinica.profissionais.map(function(p) { return '- ' + p.nome + ' (' + p.especialidade + ')'; }).join('\n');
   var servs = clinica.servicos.map(function(s) { return '- ' + s.nome + ' (' + s.duracaoMinutos + ' min' + (s.preco ? ', R$' + s.preco : '') + ')'; }).join('\n');
-  var horarioFunc = clinica.horarioFuncionamento.segunda ? clinica.horarioFuncionamento.segunda.inicio + ' às ' + clinica.horarioFuncionamento.segunda.fim : '08:00 às 18:00';
+  // Find the first working day's hours (not always segunda)
+  var firstWorking = Object.values(clinica.horarioFuncionamento).find(function(h) { return h !== null; }) || null;
+  var horarioFunc = firstWorking ? firstWorking.inicio + ' às ' + firstWorking.fim : '08:00 às 18:00';
   var hoje = new Date(Date.now() - 3 * 3600000); // Brazil timezone (UTC-3)
   var dataHoje = hoje.toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric' });
   var horaAgora = hoje.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
@@ -57,7 +59,7 @@ export function buildSystemPrompt(clinica: Clinica, horarios: string, historico?
 
 'HORÁRIOS DISPONÍVEIS (próximos 14 dias):\n' + (horarios || 'Nenhum horário carregado no momento.') + '\n\n' +
 
-(historico ? '═══════════════════════════════════\nHISTÓRICO DO PACIENTE\n═══════════════════════════════════\nEste paciente já veio antes:\n' + historico + '\nSe você já sabe o nome dele pelo histórico, use naturalmente sem pedir de novo.\n\n' : '') +
+(historico ? '═══════════════════════════════════\nHISTÓRICO DO PACIENTE\n═══════════════════════════════════\n' + historico + '\n\nIMPORTANTE:\n- Se tiver [AGENDADO FUTURO]: o paciente JÁ tem consulta agendada. Se ele quiser marcar outra, pergunte se é realmente uma segunda consulta ou se quer trocar a existente.\n- Se tiver [PASSADO]: paciente já foi atendido antes. Use o nome dele naturalmente.\n\n' : '') +
 
 '═══════════════════════════════════\n' +
 'MENSAGENS PERSONALIZADAS DA CLÍNICA\n' +
@@ -81,8 +83,8 @@ export function buildSystemPrompt(clinica: Clinica, horarios: string, historico?
 '- {data} → data da consulta (DD/MM)\n' +
 '- {hora} → horário da consulta (HH:MM)\n' +
 '- {servico} → nome do serviço\n' +
-'- {abertura} → ' + (clinica.horarioFuncionamento.segunda ? clinica.horarioFuncionamento.segunda.inicio : '08:00') + '\n' +
-'- {fechamento} → ' + (clinica.horarioFuncionamento.segunda ? clinica.horarioFuncionamento.segunda.fim : '18:00') + '\n' +
+'- {abertura} → ' + (firstWorking ? firstWorking.inicio : '08:00') + '\n' +
+'- {fechamento} → ' + (firstWorking ? firstWorking.fim : '18:00') + '\n' +
 'Quando encontrar essas variáveis nas mensagens personalizadas, SUBSTITUA pelos valores reais.\n\n' +
 
 '═══════════════════════════════════\n' +
@@ -329,19 +331,20 @@ export function buildExtractionPrompt(): string {
 
 '═══ MENSAGENS COM CONTEXTO ═══\n' +
 'A mensagem pode vir com CONTEXTO DA CONVERSA anterior. Use o contexto para interpretar melhor:\n' +
-'- "sim", "pode ser", "isso", "esse", "ok", "bora" → olhe o contexto para entender a intenção real\n' +
+'- "sim", "pode ser", "isso", "esse", "ok", "bora" → SEMPRE intencao: "outro" (o servidor preserva a intenção anterior)\n' +
 '- Se o bot perguntou qual profissional e o paciente respondeu um nome → extraia como profissional\n' +
 '- Se o bot perguntou qual dia/horário e o paciente respondeu → extraia como data/horario\n' +
-'- Se o bot pediu confirmação e o paciente disse "sim" → mantenha a intenção "agendar"\n' +
 '- Se o bot perguntou o nome e o paciente respondeu → extraia como pacienteNome\n' +
-'- "não", "nao" após pergunta de confirmação → "outro" (paciente quer mudar algo)\n' +
-'- Se o paciente mandou múltiplas linhas (mensagens seguidas), extraia TODOS os dados de todas as linhas\n\n' +
+'- "não", "nao" após pergunta de confirmação → intencao: "outro" (paciente quer mudar algo)\n' +
+'- Se o paciente mandou múltiplas linhas (mensagens seguidas), extraia TODOS os dados de todas as linhas\n' +
+'- REGRA CRÍTICA: Respostas curtas ambíguas como "sim"/"ok"/"isso" → SEMPRE "outro", nunca infira "agendar" ou "cancelar" delas\n\n' +
 
 '═══ EXEMPLOS ═══\n' +
 '"eu quero as 4 da tarde" → {"intencao":"agendar","profissional":null,"servico":null,"data":null,"horario":"16:00","periodo":"tarde","pacienteNome":null}\n' +
 '"dia 3 as 4 da tarde com dr lindomar" → {"intencao":"agendar","profissional":"lindomar","servico":null,"data":"dia 3","horario":"16:00","periodo":"tarde","pacienteNome":null}\n' +
 '"Maria Clara" → {"intencao":"outro","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":"Maria Clara"}\n' +
 '"oi" → {"intencao":"saudacao","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":null}\n' +
-'"sim" (após bot sugerir horário) → {"intencao":"agendar","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":null}\n' +
-'"pode ser" (após bot perguntar profissional) → {"intencao":"agendar","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":null}';
+'"sim" → {"intencao":"outro","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":null}\n' +
+'"pode ser" → {"intencao":"outro","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":null}\n' +
+'"ok" → {"intencao":"outro","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":null}';
 }

@@ -32,6 +32,7 @@ export function rateLimit(opts: { windowMs: number; max: number; keyPrefix?: str
   };
 }
 
-export const webhookLimiter = rateLimit({ windowMs: 60000, max: 60, keyPrefix: 'webhook' });
+// Webhook comes from trusted Evolution API with single IP — needs high limit for burst traffic from many patients
+export const webhookLimiter = rateLimit({ windowMs: 60000, max: 300, keyPrefix: 'webhook' });
 export const apiLimiter = rateLimit({ windowMs: 60000, max: 30, keyPrefix: 'api' });
 export const evolutionLimiter = rateLimit({ windowMs: 60000, max: 10, keyPrefix: 'evolution' });
