@@ -35,11 +35,13 @@ router.post('/evolution/create-instance', requireAuth, evolutionLimiter, async (
     const { data: cl } = await supabase.from('clinicas').select('id').eq('id', clinicaId).eq('user_id', req.userId).single();
     if (!cl) { res.status(403).json({ error: 'Sem permissão' }); return; }
 
-    // Delete old instance if exists (fire-and-forget, don't wait)
-    fetch(`${env.EVOLUTION_API_URL}/instance/delete/${safeName}`, {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json', 'apikey': env.EVOLUTION_API_KEY },
-    }).catch(() => {});
+    // Delete old instance if exists (await response but don't fail on errors)
+    try {
+      await fetch(`${env.EVOLUTION_API_URL}/instance/delete/${safeName}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json', 'apikey': env.EVOLUTION_API_KEY },
+      });
+    } catch {}
 
     // Create new instance WITH webhook auth
     const createResponse = await fetch(`${env.EVOLUTION_API_URL}/instance/create`, {

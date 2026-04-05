@@ -44,8 +44,13 @@ export function buildSystemPrompt(clinica: Clinica, horarios: string, historico?
 'DADOS DA CLÍNICA\n' +
 '═══════════════════════════════════\n' +
 'Nome: ' + clinica.nome + '\n' +
-'Horário de funcionamento: Segunda a Sexta, ' + horarioFunc + '\n' +
-'Não atende: Sábados, Domingos e Feriados\n\n' +
+'Horário de funcionamento: ' + (function() {
+  var nomes = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
+  var ativos = (clinica.diasAtendimento || [1,2,3,4,5]).map(function(d) { return nomes[d]; });
+  var inativos = [0,1,2,3,4,5,6].filter(function(d) { return !(clinica.diasAtendimento || [1,2,3,4,5]).includes(d); }).map(function(d) { return nomes[d]; });
+  return ativos.join(', ') + ', ' + horarioFunc + '\n' +
+    (inativos.length > 0 ? 'Não atende: ' + inativos.join(', ') + ' e Feriados' : 'Não atende: Feriados');
+})() + '\n\n' +
 
 'PROFISSIONAIS DISPONÍVEIS:\n' + profs + '\n\n' +
 'SERVIÇOS OFERECIDOS:\n' + servs + '\n\n' +

@@ -71,7 +71,15 @@ export async function processarMensagem(
     if (timeMatch) ctx.dadosColetados.horario = timeMatch[1].padStart(2, '0') + ':' + timeMatch[2];
     const dateMatch = resposta.match(/(\d{2})\/(\d{2})/);
     const brazilNow = new Date(Date.now() - 3 * 3600000);
-    if (dateMatch) ctx.dadosColetados.data = `${brazilNow.getFullYear()}-${dateMatch[2].padStart(2, '0')}-${dateMatch[1].padStart(2, '0')}`;
+    if (dateMatch) {
+      const day = parseInt(dateMatch[1]), month = parseInt(dateMatch[2]);
+      let year = brazilNow.getFullYear();
+      // If the month is in the past (e.g. confirming January in December), use next year
+      if (month < brazilNow.getMonth() + 1 || (month === brazilNow.getMonth() + 1 && day < brazilNow.getDate())) {
+        year++;
+      }
+      ctx.dadosColetados.data = `${year}-${dateMatch[2].padStart(2, '0')}-${dateMatch[1].padStart(2, '0')}`;
+    }
     logger.info('Agendamento detectado', { data: String(ctx.dadosColetados.data || ''), horario: String(ctx.dadosColetados.horario || ''), profissional: String(ctx.dadosColetados.profissional || ''), paciente: String(ctx.dadosColetados.pacienteNome || '') });
   }
 
