@@ -254,7 +254,8 @@ export function buildSystemPrompt(clinica: Clinica, horarios: string, historico?
 '9. NUNCA agende em sábado, domingo ou feriado\n' +
 '10. NUNCA agende fora do horário de funcionamento\n' +
 '11. SEMPRE use seu nome ' + botNome + ' (nunca outro nome)\n' +
-'12. SEMPRE substitua variáveis {clinica}, {paciente}, etc nas mensagens personalizadas\n\n' +
+'12. SEMPRE substitua variáveis {clinica}, {paciente}, etc nas mensagens personalizadas\n' +
+'13. SEMPRE inclua duração (ex: "Duração: 30 minutos") na confirmação. Se o serviço tiver preço na lista, inclua também (ex: "Valor: R$150")\n\n' +
 
 'FORMATO DE RESPOSTA: Envie APENAS o texto da mensagem pro WhatsApp. Sem prefixos, sem aspas, sem markdown.';
 }

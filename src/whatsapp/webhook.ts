@@ -7,6 +7,24 @@ import { validateWebhook } from '../middleware/validateWebhook';
 import { webhookLimiter } from '../middleware/rateLimit';
 import { logger } from '../utils/logger';
 import { clinicaCache, profsCache, servsCache } from '../utils/cache';
+import { env } from '../config/env';
+import crypto from 'crypto';
+
+/** Fire-and-forget webhook to dashboard — never blocks or fails the main flow */
+function notifyDashboard(type: 'handoff' | 'emergency', clinicaId: string, phone: string, extra?: Record<string, unknown>): void {
+  if (!env.DASHBOARD_WEBHOOK_URL) return;
+  fetch(env.DASHBOARD_WEBHOOK_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      type,
+      clinicaId,
+      phone,
+      timestamp: new Date().toISOString(),
+      ...extra,
+    }),
+  }).catch(() => {});
+}
 
 const router = Router();
 
@@ -46,6 +64,16 @@ const pendingBatches = new Map<string, {
   pushName: string;
 }>();
 const BATCH_DELAY_MS = 3000; // Wait 3s for more messages before processing
+const MAX_BATCH_SIZE = 10; // Protect against spam / rapid-fire abuse
+
+// Track in-flight processing for graceful shutdown
+let activeBatches = 0;
+export async function drainPendingBatches(maxWaitMs = 15000): Promise<void> {
+  const deadline = Date.now() + maxWaitMs;
+  while ((pendingBatches.size > 0 || activeBatches > 0) && Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 200));
+  }
+}
 
 router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, res: Response) => {
   res.sendStatus(200);
@@ -94,6 +122,11 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
     const existing = pendingBatches.get(batchKey);
 
     if (existing) {
+      // Drop message if batch is already at max — protect against spam
+      if (existing.texts.length >= MAX_BATCH_SIZE) {
+        logger.warn('Batch cheio, mensagem descartada', { phone, size: existing.texts.length });
+        return;
+      }
       // Add to existing batch, reset timer
       existing.texts.push(texto);
       if (!existing.pushName && pushName) existing.pushName = pushName;
@@ -124,31 +157,43 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
 
 // ── Process a batch of messages from the same user ──
 async function processarLote(phone: string, texts: string[], instanceName: string, pushName: string = '') {
+  const reqId = crypto.randomBytes(4).toString('hex');
+  activeBatches++;
   try {
-    await processarLoteInner(phone, texts, instanceName, pushName);
+    await processarLoteInner(phone, texts, instanceName, pushName, reqId);
   } catch (e) {
-    logger.error('Erro fatal no processarLote', { error: (e as Error).message, phone });
-    // Ensure patient always gets a response, even on unexpected errors
+    const errMsg = (e as Error).message?.toLowerCase() || '';
+    logger.error('Erro fatal no processarLote', { error: (e as Error).message, phone, reqId });
+    // Specific error messages for different failure types
+    let userMsg = 'Desculpa, tive um probleminha aqui. Pode tentar de novo em alguns segundos?';
+    if (errMsg.includes('anthropic') || errMsg.includes('claude') || errMsg.includes('circuit')) {
+      userMsg = 'Tô pensando um pouco devagar agora... pode tentar de novo em alguns segundos?';
+    } else if (errMsg.includes('supabase') || errMsg.includes('database') || errMsg.includes('pgrst') || errMsg.includes('postgres')) {
+      userMsg = 'Tô com um probleminha no sistema. Pode tentar de novo em 1 minutinho?';
+    } else if (errMsg.includes('timeout') || errMsg.includes('etimedout')) {
+      userMsg = 'Demorei demais pra responder, me manda de novo?';
+    }
     try {
-      await enviarMensagem(phone, 'Desculpa, tive um probleminha aqui. Pode tentar de novo em alguns segundos?', instanceName);
+      await enviarMensagem(phone, userMsg, instanceName);
     } catch {}
+  } finally {
+    activeBatches--;
   }
 }
 
-async function processarLoteInner(phone: string, texts: string[], instanceName: string, pushName: string = '') {
+async function processarLoteInner(phone: string, texts: string[], instanceName: string, pushName: string = '', reqId: string = '') {
   let texto = texts.length === 1 ? texts[0] : texts.join('\n');
 
-  if (texts.length > 1) {
-    logger.info('Batch processado', { phone, msgCount: texts.length });
-  }
+  logger.info('Batch iniciado', { phone, msgCount: texts.length, reqId });
 
   // ── Emergency detection: skip AI, escalate immediately ──
   if (detectEmergency(texto)) {
-    logger.warn('EMERGÊNCIA DETECTADA', { phone });
+    logger.warn('EMERGÊNCIA DETECTADA', { phone, reqId, stage: 'emergency' });
     // Load clinic just to mark handoff
     const { data: cl } = await supabase.from('clinicas').select('id, nome').eq('phone_number_id', instanceName).eq('ativa', true).single();
     if (cl) {
       try { await marcarHandoff(cl.id, phone); } catch {}
+      notifyDashboard('emergency', cl.id, phone, { keyword: texto.substring(0, 100) });
     }
     await enviarMensagem(phone, EMERGENCY_RESPONSE, instanceName);
     return;
@@ -170,7 +215,7 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
     if (clinicaRow) clinicaCache.set(instanceName, clinicaRow);
   }
   if (!clinicaRow) {
-    logger.warn('Webhook sem clínica correspondente', { instance: instanceName });
+    logger.warn('Webhook sem clínica correspondente', { instance: instanceName, reqId });
     return;
   }
 
@@ -215,7 +260,7 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
   let staleNote = '';
   if (salva) {
     if (salva.etapa === 'handoff_humano') {
-      logger.info('Conversa em handoff, ignorando bot', { phone });
+      logger.info('Conversa em handoff, ignorando bot', { phone, reqId, stage: salva.etapa });
       return;
     }
     ctx.etapa = salva.etapa;
@@ -228,7 +273,7 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
       if (gap > 2 * 3600000) {
         const hoursAgo = Math.floor(gap / 3600000);
         staleNote = `ATENÇÃO: O paciente voltou após ${hoursAgo}h sem responder. Cumprimente novamente e pergunte se quer continuar o agendamento anterior ou começar de novo.`;
-        logger.info('Conversa retomada após gap', { phone, hoursAgo });
+        logger.info('Conversa retomada após gap', { phone, hoursAgo, reqId, stage: salva.etapa });
       }
     }
   }
@@ -305,7 +350,7 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
 
   // Guard: if AI returned empty response, use fallback to avoid sending empty message
   if (!resultado.resposta || resultado.resposta.trim().length === 0) {
-    logger.warn('Resposta vazia do AI, usando fallback', { phone });
+    logger.warn('Resposta vazia do AI, usando fallback', { phone, reqId, stage: resultado.contexto.etapa });
     resultado.resposta = 'Desculpa, tive um probleminha aqui. Pode repetir?';
   }
 
@@ -332,7 +377,7 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
       (resultado.resposta.toLowerCase().includes('cancelad') || resultado.resposta.toLowerCase().includes('desmarcad'))) {
     const cancelled = await cancelarAgendamentoPaciente(clinica.id, phone);
     if (cancelled) {
-      logger.info('Agendamento cancelado via bot', { phone, clinica: clinica.nome });
+      logger.info('Agendamento cancelado via bot', { phone, clinica: clinica.nome, reqId, stage: 'cancelado' });
     }
     await enviarMensagem(phone, resultado.resposta, instanceName);
     await limparConversa(clinica.id, phone);
@@ -343,14 +388,15 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
   if (resultado.contexto.dadosColetados.intencao === 'remarcar') {
     const cancelled = await cancelarAgendamentoPaciente(clinica.id, phone);
     if (cancelled) {
-      logger.info('Agendamento anterior cancelado para remarcação', { phone, clinica: clinica.nome });
+      logger.info('Agendamento anterior cancelado para remarcação', { phone, clinica: clinica.nome, reqId, stage: 'remarcacao' });
     }
   }
 
   // HANDOFF: mark for human and stop bot
   if (resultado.contexto.etapa === 'handoff_humano') {
     await marcarHandoff(clinica.id, phone);
-    logger.info('Handoff para humano', { phone, clinica: clinica.nome });
+    notifyDashboard('handoff', clinica.id, phone);
+    logger.info('Handoff para humano', { phone, clinica: clinica.nome, reqId, stage: 'handoff' });
     await enviarMensagem(phone, resultado.resposta, instanceName);
     return;
   }
@@ -369,7 +415,7 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
   if (resultado.contexto.etapa === 'agendamento_concluido') {
     try {
       const d = resultado.contexto.dadosColetados;
-      logger.info('AGENDAMENTO INICIANDO', { profissional: String(d.profissional || ''), data: String(d.data || ''), horario: String(d.horario || ''), paciente: String(d.pacienteNome || ''), profsDB: clinica.profissionais.map(p => p.nome).join(', ') });
+      logger.info('AGENDAMENTO INICIANDO', { profissional: String(d.profissional || ''), data: String(d.data || ''), horario: String(d.horario || ''), paciente: String(d.pacienteNome || ''), profsDB: clinica.profissionais.map(p => p.nome).join(', '), reqId, stage: 'agendamento_concluido' });
 
       let prof = clinica.profissionais.find(p => {
         const np = p.nome.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -391,7 +437,7 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
       const duracao = serv ? serv.duracaoMinutos : (clinica.servicos[0]?.duracaoMinutos || 30);
       const dt = resolverDataHora(d.data, d.horario);
 
-      logger.info('AGENDAMENTO RESOLVE', { dt: String(dt || 'NULL'), profFound: !!prof, profNome: String(prof?.nome || 'NONE') });
+      logger.info('AGENDAMENTO RESOLVE', { dt: String(dt || 'NULL'), profFound: !!prof, profNome: String(prof?.nome || 'NONE'), reqId });
 
       if (dt && prof) {
         // Defense in depth: validate appointment time isn't in lunch break
@@ -405,7 +451,7 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
           const lsMins = lsH * 60 + lsM;
           const leMins = leH * 60 + leM;
           if (apptMins >= lsMins && apptMins < leMins) {
-            logger.warn('Tentativa de agendamento no horário de almoço', { phone, horario: String(d.horario) });
+            logger.warn('Tentativa de agendamento no horário de almoço', { phone, horario: String(d.horario), reqId });
             await enviarMensagem(phone, 'Ops, esse horário cai no nosso intervalo de almoço! Pode escolher outro?', instanceName);
             return;
           }
@@ -414,17 +460,17 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
         try {
           await criarAgendamento({ clinicaId: clinica.id, profissionalId: prof.id, pacienteNome: d.pacienteNome || pushName || 'Paciente', pacienteTelefone: phone, dataHora: dt, duracaoMinutos: duracao });
           await limparConversa(clinica.id, phone);
-          logger.info('Agendamento salvo', { clinica: clinica.nome, prof: prof.nome, dt });
+          logger.info('Agendamento salvo', { clinica: clinica.nome, prof: prof.nome, dt, reqId, stage: 'saved' });
           // Friendly follow-up message to close the interaction
           await enviarMensagem(phone, 'Precisa de mais alguma coisa? 😊', instanceName);
         } catch (err) {
           // Slot conflict or other DB error — notify patient so they know
-          logger.warn('Conflito ao criar agendamento', { error: (err as Error).message, phone, dt });
+          logger.warn('Conflito ao criar agendamento', { error: (err as Error).message, phone, dt, reqId });
           await enviarMensagem(phone, 'Ops, esse horário acabou de ser preenchido por outro paciente! Pode escolher outro horário?', instanceName);
         }
       } else {
         // Invalid prof/date — don't leave patient thinking they're booked
-        logger.warn('AGENDAMENTO FALHOU', { dtNull: !dt, profNull: !prof, data: String(d.data || ''), horario: String(d.horario || ''), profissional: String(d.profissional || '') });
+        logger.warn('AGENDAMENTO FALHOU', { dtNull: !dt, profNull: !prof, data: String(d.data || ''), horario: String(d.horario || ''), profissional: String(d.profissional || ''), reqId });
         await enviarMensagem(phone, 'Ops, tive um probleminha pra registrar seu agendamento. Pode me confirmar de novo o nome do profissional e o horário?', instanceName);
       }
     } catch (e) { logger.error('Erro agendamento', { error: (e as Error).message }); }

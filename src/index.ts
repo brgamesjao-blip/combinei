@@ -3,7 +3,7 @@ import cors from 'cors';
 import { env } from './config/env';
 import { errorHandler } from './middleware/errorHandler';
 import { logger } from './utils/logger';
-import whatsappWebhook from './whatsapp/webhook';
+import whatsappWebhook, { drainPendingBatches } from './whatsapp/webhook';
 import onboardingRoutes from './onboarding/routes';
 import evolutionRoutes from './evolution/routes';
 import notificationRoutes from './notifications/routes';
@@ -58,4 +58,19 @@ app.use(cacheRoutes);
 app.use(errorHandler);
 
 const port = Number(env.PORT) || 3000;
-app.listen(port, '0.0.0.0', () => { logger.info('Server started', { port, env: env.NODE_ENV }); });
+const server = app.listen(port, '0.0.0.0', () => { logger.info('Server started', { port, env: env.NODE_ENV }); });
+
+// Graceful shutdown — wait for in-flight batches before exiting
+async function shutdown(signal: string) {
+  logger.info('Shutdown signal received', { signal });
+  server.close();
+  try {
+    await drainPendingBatches(15000);
+    logger.info('Shutdown completo, saindo');
+  } catch (e) {
+    logger.error('Erro no shutdown', { error: (e as Error).message });
+  }
+  process.exit(0);
+}
+process.on('SIGTERM', () => { shutdown('SIGTERM'); });
+process.on('SIGINT', () => { shutdown('SIGINT'); });

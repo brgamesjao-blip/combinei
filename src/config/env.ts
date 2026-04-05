@@ -16,6 +16,7 @@ export const env = {
   WEBHOOK_URL: process.env.WEBHOOK_URL || '',
   NOTIFICATION_API_KEY: process.env.NOTIFICATION_API_KEY || '',
   CONVERSATION_TIMEOUT_HOURS: Number(process.env.CONVERSATION_TIMEOUT_HOURS) || 24,
+  DASHBOARD_WEBHOOK_URL: process.env.DASHBOARD_WEBHOOK_URL || '',
 } as const;
 
 // Validate critical env vars at startup — warn loudly if missing (don't crash to allow healthcheck)

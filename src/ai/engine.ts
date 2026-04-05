@@ -39,18 +39,31 @@ export async function processarMensagem(
 
   ctx.historicoMensagens.push({ role: 'user', content: msg });
 
+  const systemPrompt = buildSystemPrompt(contexto.clinica, horariosTexto, historico);
+  const messagesForAI = ctx.historicoMensagens.slice(-20).map(m => ({
+    role: m.role as 'user' | 'assistant', content: m.content,
+  }));
+
+  // Debug: log AI call details in development
+  logger.debug('AI CALL', {
+    systemPromptLen: systemPrompt.length,
+    systemPromptSample: systemPrompt.substring(0, 300),
+    msgCount: messagesForAI.length,
+    lastMsg: messagesForAI[messagesForAI.length - 1]?.content?.substring(0, 200),
+  });
+
   const resposta = await withCircuitBreaker<string>('anthropic-chat', async () => {
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 1024,
       temperature: 0.7, // Lower temp → more consistent responses, still natural
-      system: buildSystemPrompt(contexto.clinica, horariosTexto, historico),
-      messages: ctx.historicoMensagens.slice(-20).map(m => ({
-        role: m.role as 'user' | 'assistant', content: m.content,
-      })),
+      system: systemPrompt,
+      messages: messagesForAI,
     });
     return response.content[0].type === 'text' ? response.content[0].text : '';
   }, FALLBACK_MSG);
+
+  logger.debug('AI RESPONSE', { response: resposta.substring(0, 300) });
 
   ctx.historicoMensagens.push({ role: 'assistant', content: resposta });
 
