@@ -25,6 +25,7 @@ const pendingBatches = new Map<string, {
   texts: string[];
   timer: ReturnType<typeof setTimeout>;
   instanceName: string;
+  pushName: string;
 }>();
 const BATCH_DELAY_MS = 3000; // Wait 3s for more messages before processing
 
@@ -67,6 +68,7 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
     }
     if (!texto) return;
 
+    const pushName = data.pushName || '';
     logger.info('Msg recebida', { phone, instance: instanceName });
 
     // ── Batch messages: wait BATCH_DELAY_MS for more messages before processing ──
@@ -76,21 +78,23 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
     if (existing) {
       // Add to existing batch, reset timer
       existing.texts.push(texto);
+      if (!existing.pushName && pushName) existing.pushName = pushName;
       clearTimeout(existing.timer);
       existing.timer = setTimeout(() => {
         pendingBatches.delete(batchKey);
-        processarLote(phone, existing.texts, existing.instanceName).catch(e =>
+        processarLote(phone, existing.texts, existing.instanceName, existing.pushName).catch(e =>
           logger.error('Batch processing error', { error: (e as Error).message, phone })
         );
       }, BATCH_DELAY_MS);
     } else {
       // Create new batch
-      const batch: { texts: string[]; timer: ReturnType<typeof setTimeout>; instanceName: string } = {
+      const batch: { texts: string[]; timer: ReturnType<typeof setTimeout>; instanceName: string; pushName: string } = {
         texts: [texto],
         instanceName,
+        pushName,
         timer: setTimeout(() => {
           pendingBatches.delete(batchKey);
-          processarLote(phone, batch.texts, batch.instanceName).catch(e =>
+          processarLote(phone, batch.texts, batch.instanceName, batch.pushName).catch(e =>
             logger.error('Batch processing error', { error: (e as Error).message, phone })
           );
         }, BATCH_DELAY_MS),
@@ -101,8 +105,8 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
 });
 
 // ── Process a batch of messages from the same user ──
-async function processarLote(phone: string, texts: string[], instanceName: string) {
-  const texto = texts.length === 1 ? texts[0] : texts.join('\n');
+async function processarLote(phone: string, texts: string[], instanceName: string, pushName: string = '') {
+  let texto = texts.length === 1 ? texts[0] : texts.join('\n');
 
   if (texts.length > 1) {
     logger.info('Batch processado', { phone, msgCount: texts.length });
@@ -167,6 +171,16 @@ async function processarLote(phone: string, texts: string[], instanceName: strin
     ctx.etapa = salva.etapa;
     ctx.dadosColetados = salva.dadosColetados;
     ctx.historicoMensagens = salva.historicoMensagens;
+
+    // Detect stale conversation (gap > 2 hours) — tell AI to greet again
+    if (salva.updatedAt) {
+      const gap = Date.now() - new Date(salva.updatedAt).getTime();
+      if (gap > 2 * 3600000) {
+        const hoursAgo = Math.floor(gap / 3600000);
+        texto = `[SISTEMA: O paciente voltou após ${hoursAgo}h sem responder. Cumprimente novamente e pergunte se quer continuar o agendamento anterior ou começar de novo.]\n${texto}`;
+        logger.info('Conversa retomada após gap', { phone, hoursAgo });
+      }
+    }
   }
 
   // ── Generate available slots ──
@@ -206,8 +220,16 @@ async function processarLote(phone: string, texts: string[], instanceName: strin
     hist = antigos.map((a: any) => `- ${a.paciente_nome || 'Paciente'} com ${(a.profissionais as any)?.nome || '?'} em ${new Date(a.data_hora).toLocaleDateString('pt-BR')}`).join('\n');
   }
 
+  // ── Use WhatsApp profile name if available ──
+  let histFinal = hist || '';
+  if (pushName && !ctx.dadosColetados.pacienteNome) {
+    histFinal = (histFinal ? histFinal + '\n\n' : '') +
+      'Nome no perfil do WhatsApp deste paciente: ' + pushName +
+      '. Ao pedir o nome completo, sugira: "Seu nome é ' + pushName + '?" — se confirmar, use sem pedir de novo.';
+  }
+
   // ── Process with AI ──
-  const resultado = await processarMensagem(texto, ctx, hist);
+  const resultado = await processarMensagem(texto, ctx, histFinal || undefined);
 
   // ── Handle special states AFTER AI response ──
 
@@ -221,6 +243,14 @@ async function processarLote(phone: string, texts: string[], instanceName: strin
     await enviarMensagem(phone, resultado.resposta, instanceName);
     await limparConversa(clinica.id, phone);
     return;
+  }
+
+  // REMARCAÇÃO: cancel existing appointment, continue with new booking flow
+  if (resultado.contexto.dadosColetados.intencao === 'remarcar') {
+    const cancelled = await cancelarAgendamentoPaciente(clinica.id, phone);
+    if (cancelled) {
+      logger.info('Agendamento anterior cancelado para remarcação', { phone, clinica: clinica.nome });
+    }
   }
 
   // HANDOFF: mark for human and stop bot
@@ -290,12 +320,27 @@ function gerarHorarios(ab?: string, fe?: string, ai?: string, af?: string, diasA
   const dias: HorarioDisponivel[] = [];
   const nomes = ['Domingo', 'Segunda', 'Terca', 'Quarta', 'Quinta', 'Sexta', 'Sabado'];
   const hoje = getBrazilNow();
-  for (let i = 1; i <= 14; i++) {
+  const horaAtual = hoje.getHours();
+  const minAtual = hoje.getMinutes();
+  for (let i = 0; i <= 14; i++) { // Start from today (i=0)
     const d = new Date(hoje.getTime() + i * 86400000);
     if (!diasAtend.includes(d.getDay())) continue;
     const horarios: string[] = [];
-    for (let h = hI; h < hF; h++) { if (h >= hAI && h < hAF) continue; horarios.push(String(h).padStart(2, '0') + ':00'); horarios.push(String(h).padStart(2, '0') + ':30'); }
-    dias.push({ data: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`, diaSemana: nomes[d.getDay()], horarios });
+    for (let h = hI; h < hF; h++) {
+      if (h >= hAI && h < hAF) continue;
+      const slots = [String(h).padStart(2, '0') + ':00', String(h).padStart(2, '0') + ':30'];
+      for (const slot of slots) {
+        // For today, skip past time slots
+        if (i === 0) {
+          const [sh, sm] = slot.split(':').map(Number);
+          if (sh < horaAtual || (sh === horaAtual && sm <= minAtual)) continue;
+        }
+        horarios.push(slot);
+      }
+    }
+    if (horarios.length > 0) {
+      dias.push({ data: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`, diaSemana: nomes[d.getDay()], horarios });
+    }
   }
   return dias;
 }
@@ -309,8 +354,19 @@ function filtrarOcupadosMultiProf(horarios: HorarioDisponivel[], ocupados: any[]
     const iso = String(e.data_hora);
     const dateStr = iso.substring(0, 10);
     const timeStr = iso.substring(11, 16);
-    const key = `${dateStr}_${timeStr}`;
-    slotCount[key] = (slotCount[key] || 0) + 1;
+    const duracao = e.duracao_minutos || 30;
+
+    // Block all 30-min slots covered by this appointment's duration
+    const [startH, startM] = timeStr.split(':').map(Number);
+    let mins = startH * 60 + startM;
+    const endMins = mins + duracao;
+    while (mins < endMins) {
+      const hh = String(Math.floor(mins / 60)).padStart(2, '0');
+      const mm = String(mins % 60).padStart(2, '0');
+      const key = `${dateStr}_${hh}:${mm}`;
+      slotCount[key] = (slotCount[key] || 0) + 1;
+      mins += 30;
+    }
   });
 
   return horarios.map(dia => ({

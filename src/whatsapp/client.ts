@@ -21,6 +21,16 @@ export async function enviarMensagem(para: string, texto: string, instanceName?:
 
   const numero = para.replace(/\D/g, '');
 
+  // Typing indicator — makes the bot feel human
+  try {
+    fetch(`${env.EVOLUTION_API_URL}/chat/sendPresence/${instance}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: env.EVOLUTION_API_KEY },
+      body: JSON.stringify({ number: numero, presence: 'composing' }),
+    }).catch(() => {});
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  } catch {}
+
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const response = await fetch(

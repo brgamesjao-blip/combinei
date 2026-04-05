@@ -7,7 +7,7 @@ export async function buscarConversa(clinicaId: string, telefone: string) {
   const { data } = await supabase.from('conversas').select('*')
     .eq('clinica_id', clinicaId).eq('paciente_telefone', telefone).single();
   if (!data) return null;
-  return { etapa: data.etapa, dadosColetados: data.dados_coletados || {}, historicoMensagens: data.historico_mensagens || [] };
+  return { etapa: data.etapa, dadosColetados: data.dados_coletados || {}, historicoMensagens: data.historico_mensagens || [], updatedAt: data.updated_at || null };
 }
 
 export async function salvarConversa(clinicaId: string, telefone: string, ctx: {
