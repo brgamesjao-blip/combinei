@@ -106,6 +106,18 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
 
 // ── Process a batch of messages from the same user ──
 async function processarLote(phone: string, texts: string[], instanceName: string, pushName: string = '') {
+  try {
+    await processarLoteInner(phone, texts, instanceName, pushName);
+  } catch (e) {
+    logger.error('Erro fatal no processarLote', { error: (e as Error).message, phone });
+    // Ensure patient always gets a response, even on unexpected errors
+    try {
+      await enviarMensagem(phone, 'Desculpa, tive um probleminha aqui. Pode tentar de novo em alguns segundos?', instanceName);
+    } catch {}
+  }
+}
+
+async function processarLoteInner(phone: string, texts: string[], instanceName: string, pushName: string = '') {
   let texto = texts.length === 1 ? texts[0] : texts.join('\n');
 
   if (texts.length > 1) {
