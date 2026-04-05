@@ -11,7 +11,9 @@ const FALLBACK_MSG = 'Desculpa, estou com um probleminha técnico. Pode tentar d
 export async function processarMensagem(
   msg: string, contexto: ContextoConversa, historico?: string
 ): Promise<{ resposta: string; contexto: ContextoConversa }> {
-  const dados = await extrairDados(msg);
+  // Pass recent conversation history so extraction understands context
+  const recentMessages = contexto.historicoMensagens.slice(-6);
+  const dados = await extrairDados(msg, recentMessages);
   const ctx: ContextoConversa = {
     ...contexto,
     dadosColetados: { ...contexto.dadosColetados },
@@ -37,7 +39,7 @@ export async function processarMensagem(
   const resposta = await withCircuitBreaker<string>('anthropic-chat', async () => {
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 600,
+      max_tokens: 1024,
       system: buildSystemPrompt(contexto.clinica, horariosTexto, historico),
       messages: ctx.historicoMensagens.slice(-20).map(m => ({
         role: m.role as 'user' | 'assistant', content: m.content,
@@ -49,7 +51,7 @@ export async function processarMensagem(
   ctx.historicoMensagens.push({ role: 'assistant', content: resposta });
 
   // Detect appointment conclusion - multiple phrases
-  // RISK 1 FIX: Only trigger if AI confirms AND we have minimum data (profissional + horario or data)
+  // Only trigger if AI confirms AND we have minimum data (profissional + horario or data)
   const rl = resposta.toLowerCase();
   const hasConfirmPhrase = (
     rl.includes('combinei') || rl.includes('agendado') || rl.includes('agendada') ||
@@ -68,7 +70,6 @@ export async function processarMensagem(
     const timeMatch = resposta.match(/(\d{1,2}):(\d{2})/);
     if (timeMatch) ctx.dadosColetados.horario = timeMatch[1].padStart(2, '0') + ':' + timeMatch[2];
     const dateMatch = resposta.match(/(\d{2})\/(\d{2})/);
-    // RISK 2 FIX: Use Brazil timezone for year
     const brazilNow = new Date(Date.now() - 3 * 3600000);
     if (dateMatch) ctx.dadosColetados.data = `${brazilNow.getFullYear()}-${dateMatch[2].padStart(2, '0')}-${dateMatch[1].padStart(2, '0')}`;
     logger.info('Agendamento detectado', { data: String(ctx.dadosColetados.data || ''), horario: String(ctx.dadosColetados.horario || ''), profissional: String(ctx.dadosColetados.profissional || ''), paciente: String(ctx.dadosColetados.pacienteNome || '') });
@@ -77,14 +78,26 @@ export async function processarMensagem(
   return { resposta, contexto: ctx };
 }
 
-async function extrairDados(msg: string): Promise<DadosExtraidos> {
+async function extrairDados(
+  msg: string,
+  recentMessages?: Array<{ role: string; content: string }>
+): Promise<DadosExtraidos> {
   try {
+    // Build user message with conversation context for better understanding
+    let userMsg = msg;
+    if (recentMessages && recentMessages.length > 0) {
+      const ctx = recentMessages.slice(-6).map(m =>
+        `${m.role === 'user' ? 'PACIENTE' : 'RECEPCIONISTA'}: ${m.content}`
+      ).join('\n');
+      userMsg = `CONTEXTO DA CONVERSA:\n${ctx}\n\n---\nMENSAGEM ATUAL (extraia dados desta):\n${msg}`;
+    }
+
     const r = await withCircuitBreaker('anthropic-extract', async () => {
       return anthropic.messages.create({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 300,
         system: buildExtractionPrompt(),
-        messages: [{ role: 'user', content: msg }],
+        messages: [{ role: 'user', content: userMsg }],
       });
     });
     if (!r) return { intencao: 'outro' };

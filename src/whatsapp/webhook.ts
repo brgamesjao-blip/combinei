@@ -20,6 +20,14 @@ function getBrazilNow(): Date {
 const processedMessages = new Map<string, number>();
 setInterval(() => { const cut = Date.now() - 300000; for (const [k, v] of processedMessages) { if (v < cut) processedMessages.delete(k); } }, 60000);
 
+// ── Message batching: accumulate rapid-fire messages before processing ──
+const pendingBatches = new Map<string, {
+  texts: string[];
+  timer: ReturnType<typeof setTimeout>;
+  instanceName: string;
+}>();
+const BATCH_DELAY_MS = 3000; // Wait 3s for more messages before processing
+
 router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, res: Response) => {
   res.sendStatus(200);
   try {
@@ -41,187 +49,236 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
     const phone = remoteJid.replace('@s.whatsapp.net', '').replace('@c.us', '');
     if (!phone) return;
 
+    // ── Extract text (with media support) ──
     let texto = '';
-    if (data.message) texto = data.message.conversation || data.message.extendedTextMessage?.text || '';
+    if (data.message) {
+      texto = data.message.conversation || data.message.extendedTextMessage?.text || '';
+      // Image/video with caption
+      if (!texto && data.message.imageMessage?.caption) texto = data.message.imageMessage.caption;
+      if (!texto && data.message.videoMessage?.caption) texto = data.message.videoMessage.caption;
+      // Media without text — let AI respond appropriately
+      if (!texto) {
+        if (data.message.audioMessage) texto = '[O paciente enviou um áudio]';
+        else if (data.message.imageMessage) texto = '[O paciente enviou uma imagem]';
+        else if (data.message.videoMessage) texto = '[O paciente enviou um vídeo]';
+        else if (data.message.stickerMessage) texto = '[O paciente enviou uma figurinha]';
+        else if (data.message.documentMessage) texto = '[O paciente enviou um documento]';
+      }
+    }
     if (!texto) return;
 
     logger.info('Msg recebida', { phone, instance: instanceName });
 
-    // ── Load clinic data (WITH CACHE) ──
-    let clinicaRow = clinicaCache.get(instanceName);
-    if (!clinicaRow) {
-      const { data: byInst } = await supabase.from('clinicas').select('*').eq('phone_number_id', instanceName).eq('ativa', true).single();
-      clinicaRow = byInst;
-      if (!clinicaRow) {
-        const { data: first } = await supabase.from('clinicas').select('*').eq('ativa', true).limit(1).single();
-        clinicaRow = first;
-      }
-      if (clinicaRow) clinicaCache.set(instanceName, clinicaRow);
-    }
-    if (!clinicaRow) return;
+    // ── Batch messages: wait BATCH_DELAY_MS for more messages before processing ──
+    const batchKey = `${instanceName}:${phone}`;
+    const existing = pendingBatches.get(batchKey);
 
-    // Cached professionals & services
-    let profs = profsCache.get(clinicaRow.id);
-    if (!profs) {
-      const { data: p } = await supabase.from('profissionais').select('*').eq('clinica_id', clinicaRow.id).eq('ativo', true);
-      profs = p || [];
-      profsCache.set(clinicaRow.id, profs);
-    }
-
-    let servs = servsCache.get(clinicaRow.id);
-    if (!servs) {
-      const { data: s } = await supabase.from('servicos').select('*').eq('clinica_id', clinicaRow.id).eq('ativo', true);
-      servs = s || [];
-      servsCache.set(clinicaRow.id, servs);
-    }
-
-    // ── Build clinic object (with configurable working days) ──
-    const diasAtendimento: number[] = clinicaRow.dias_atendimento || [1, 2, 3, 4, 5]; // default seg-sex
-
-    const horarioBase = { inicio: clinicaRow.horario_abertura || '08:00', fim: clinicaRow.horario_fechamento || '18:00' };
-    const diasNomes = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sexta', 'sabado'];
-    const horFunc: Record<string, { inicio: string; fim: string } | null> = {};
-    diasNomes.forEach((d, i) => { horFunc[d] = diasAtendimento.includes(i) ? horarioBase : null; });
-
-    const clinica: Clinica = {
-      id: clinicaRow.id, nome: clinicaRow.nome, telefone: clinicaRow.telefone || '',
-      botNome: clinicaRow.bot_nome || 'Bia',
-      msgSaudacao: clinicaRow.msg_saudacao || null, msgConfirmacao: clinicaRow.msg_confirmacao || null,
-      msgCancelamento: clinicaRow.msg_cancelamento || null, msgForaHorario: clinicaRow.msg_fora_horario || null,
-      msgSemHorario: clinicaRow.msg_sem_horario || null,
-      diasAtendimento,
-      profissionais: profs.map((p: any) => ({ id: p.id, nome: p.nome, especialidade: p.especialidade, servicos: [] })),
-      servicos: servs.map((s: any) => ({ id: s.id, nome: s.nome, duracaoMinutos: s.duracao_minutos, preco: s.preco })),
-      horarioFuncionamento: horFunc,
-    };
-
-    // ── Load conversation state ──
-    const salva = await buscarConversa(clinica.id, phone);
-    const ctx = criarContextoInicial(clinica);
-    if (salva) {
-      // If in handoff, don't process with bot
-      if (salva.etapa === 'handoff_humano') {
-        logger.info('Conversa em handoff, ignorando bot', { phone });
-        return;
-      }
-      ctx.etapa = salva.etapa;
-      ctx.dadosColetados = salva.dadosColetados;
-      ctx.historicoMensagens = salva.historicoMensagens;
-    }
-
-    // ── Generate available slots (supports Saturday) ──
-    ctx.horariosOferecidos = gerarHorarios(
-      clinicaRow.horario_abertura, clinicaRow.horario_fechamento,
-      clinicaRow.almoco_inicio, clinicaRow.almoco_fim, diasAtendimento
-    );
-
-    // ── Filter folgas and occupied slots ──
-    const hoje = getBrazilNow();
-    const hojeStr = hoje.toISOString().split('T')[0];
-    const fimStr = new Date(hoje.getTime() + 14 * 86400000).toISOString().split('T')[0];
-
-    const [folgasR, ocupadosR, antigosR] = await Promise.all([
-      supabase.from('folgas').select('data, profissional_id').eq('clinica_id', clinica.id).gte('data', hojeStr),
-      getOcupadosPorProfissional(clinica.id, hojeStr + 'T00:00:00', fimStr + 'T23:59:59'),
-      supabase.from('agendamentos').select('*, profissionais(nome)').eq('clinica_id', clinica.id).eq('paciente_telefone', phone).order('created_at', { ascending: false }).limit(5),
-    ]);
-
-    // Filter folgas (only remove day if ALL professionals are on leave)
-    if (folgasR.data && folgasR.data.length > 0) {
-      ctx.horariosOferecidos = ctx.horariosOferecidos.filter((dia) => {
-        const pf = folgasR.data!.filter((f: any) => f.data === dia.data);
-        return pf.length < clinica.profissionais.length;
-      });
-    }
-
-    // Multi-professional filter: only remove slot if ALL professionals are occupied at that time
-    if (ocupadosR.length > 0) {
-      ctx.horariosOferecidos = filtrarOcupadosMultiProf(ctx.horariosOferecidos, ocupadosR, clinica.profissionais.length);
-    }
-
-    // Patient history
-    let hist: string | undefined;
-    const antigos = antigosR.data || [];
-    if (antigos.length > 0) {
-      hist = antigos.map((a: any) => `- ${a.paciente_nome || 'Paciente'} com ${(a.profissionais as any)?.nome || '?'} em ${new Date(a.data_hora).toLocaleDateString('pt-BR')}`).join('\n');
-    }
-
-    // ── Process with AI ──
-    const resultado = await processarMensagem(texto, ctx, hist);
-
-    // ── Handle special states AFTER AI response ──
-
-    // CANCELAMENTO: only execute AFTER AI confirms (not on first intent)
-    // FIX #5: Look for cancellation confirmation in AI response, not just intent
-    if (resultado.contexto.dadosColetados.intencao === 'cancelar' &&
-        (resultado.resposta.toLowerCase().includes('cancelad') || resultado.resposta.toLowerCase().includes('desmarcad'))) {
-      const cancelled = await cancelarAgendamentoPaciente(clinica.id, phone);
-      if (cancelled) {
-        logger.info('Agendamento cancelado via bot', { phone, clinica: clinica.nome });
-      }
-      // FIX #4: Send response, clear conversation, and RETURN (don't re-save)
-      await enviarMensagem(phone, resultado.resposta, instanceName);
-      await limparConversa(clinica.id, phone);
-      return;
-    }
-
-    // HANDOFF: mark for human and stop bot
-    if (resultado.contexto.etapa === 'handoff_humano') {
-      await marcarHandoff(clinica.id, phone); // FIX #3: This already inserts notification
-      logger.info('Handoff para humano', { phone, clinica: clinica.nome });
-      await enviarMensagem(phone, resultado.resposta, instanceName);
-      return; // Don't save normal conversation state
-    }
-
-    // Save conversation
-    await salvarConversa(clinica.id, phone, {
-      etapa: resultado.contexto.etapa,
-      dadosColetados: resultado.contexto.dadosColetados as Record<string, unknown>,
-      historicoMensagens: resultado.contexto.historicoMensagens,
-    });
-
-    // Send response
-    await enviarMensagem(phone, resultado.resposta, instanceName);
-
-    // ── Create appointment if concluded ──
-    if (resultado.contexto.etapa === 'agendamento_concluido') {
-      try {
-        const d = resultado.contexto.dadosColetados;
-        logger.info('AGENDAMENTO INICIANDO', { profissional: String(d.profissional || ''), data: String(d.data || ''), horario: String(d.horario || ''), paciente: String(d.pacienteNome || ''), profsDB: clinica.profissionais.map(p => p.nome).join(', ') });
-
-        let prof = clinica.profissionais.find(p => {
-          const np = p.nome.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-          const b = (d.profissional || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-          if (!b) return false;
-          if (np.includes(b) || b.includes(np)) return true;
-          const words = b.replace(/^(doutora?|dra?\.?|doutor|dr\.?)\s*/i, '').split(/\s+/).filter(Boolean);
-          return words.length > 0 && words.every(w => np.includes(w));
-        });
-        // Fallback: if only 1 professional exists, use them
-        if (!prof && clinica.profissionais.length === 1) prof = clinica.profissionais[0];
-        // Fallback: if profissional name partially matches any
-        if (!prof && d.profissional) {
-          const bWords = (d.profissional || '').toLowerCase().replace(/^(doutora?|dra?\.?|doutor|dr\.?)\s*/i, '').split(/\s+/).filter(Boolean);
-          prof = clinica.profissionais.find(p => bWords.some(w => p.nome.toLowerCase().includes(w)));
-        }
-
-        const serv = clinica.servicos.find(s => (d.servico || '').toLowerCase().includes(s.nome.toLowerCase()));
-        const duracao = serv ? serv.duracaoMinutos : (clinica.servicos[0]?.duracaoMinutos || 30);
-        const dt = resolverDataHora(d.data, d.horario);
-
-        logger.info('AGENDAMENTO RESOLVE', { dt: String(dt || 'NULL'), profFound: !!prof, profNome: String(prof?.nome || 'NONE') });
-
-        if (dt && prof) {
-          await criarAgendamento({ clinicaId: clinica.id, profissionalId: prof.id, pacienteNome: d.pacienteNome || 'Paciente', pacienteTelefone: phone, dataHora: dt, duracaoMinutos: duracao });
-          await limparConversa(clinica.id, phone);
-          logger.info('Agendamento salvo', { clinica: clinica.nome, prof: prof.nome, dt });
-        } else {
-          logger.warn('AGENDAMENTO FALHOU', { dtNull: !dt, profNull: !prof, data: String(d.data || ''), horario: String(d.horario || ''), profissional: String(d.profissional || '') });
-        }
-      } catch (e) { logger.error('Erro agendamento', { error: (e as Error).message }); }
+    if (existing) {
+      // Add to existing batch, reset timer
+      existing.texts.push(texto);
+      clearTimeout(existing.timer);
+      existing.timer = setTimeout(() => {
+        pendingBatches.delete(batchKey);
+        processarLote(phone, existing.texts, existing.instanceName).catch(e =>
+          logger.error('Batch processing error', { error: (e as Error).message, phone })
+        );
+      }, BATCH_DELAY_MS);
+    } else {
+      // Create new batch
+      const batch: { texts: string[]; timer: ReturnType<typeof setTimeout>; instanceName: string } = {
+        texts: [texto],
+        instanceName,
+        timer: setTimeout(() => {
+          pendingBatches.delete(batchKey);
+          processarLote(phone, batch.texts, batch.instanceName).catch(e =>
+            logger.error('Batch processing error', { error: (e as Error).message, phone })
+          );
+        }, BATCH_DELAY_MS),
+      };
+      pendingBatches.set(batchKey, batch);
     }
   } catch (e) { logger.error('Webhook error', { error: (e as Error).message }); }
 });
+
+// ── Process a batch of messages from the same user ──
+async function processarLote(phone: string, texts: string[], instanceName: string) {
+  const texto = texts.length === 1 ? texts[0] : texts.join('\n');
+
+  if (texts.length > 1) {
+    logger.info('Batch processado', { phone, msgCount: texts.length });
+  }
+
+  // ── Load clinic data (WITH CACHE) ──
+  let clinicaRow = clinicaCache.get(instanceName);
+  if (!clinicaRow) {
+    const { data: byInst } = await supabase.from('clinicas').select('*').eq('phone_number_id', instanceName).eq('ativa', true).single();
+    clinicaRow = byInst;
+    if (!clinicaRow) {
+      const { data: first } = await supabase.from('clinicas').select('*').eq('ativa', true).limit(1).single();
+      clinicaRow = first;
+    }
+    if (clinicaRow) clinicaCache.set(instanceName, clinicaRow);
+  }
+  if (!clinicaRow) return;
+
+  // Cached professionals & services
+  let profs = profsCache.get(clinicaRow.id);
+  if (!profs) {
+    const { data: p } = await supabase.from('profissionais').select('*').eq('clinica_id', clinicaRow.id).eq('ativo', true);
+    profs = p || [];
+    profsCache.set(clinicaRow.id, profs);
+  }
+
+  let servs = servsCache.get(clinicaRow.id);
+  if (!servs) {
+    const { data: s } = await supabase.from('servicos').select('*').eq('clinica_id', clinicaRow.id).eq('ativo', true);
+    servs = s || [];
+    servsCache.set(clinicaRow.id, servs);
+  }
+
+  // ── Build clinic object (with configurable working days) ──
+  const diasAtendimento: number[] = clinicaRow.dias_atendimento || [1, 2, 3, 4, 5];
+
+  const horarioBase = { inicio: clinicaRow.horario_abertura || '08:00', fim: clinicaRow.horario_fechamento || '18:00' };
+  const diasNomes = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sexta', 'sabado'];
+  const horFunc: Record<string, { inicio: string; fim: string } | null> = {};
+  diasNomes.forEach((d, i) => { horFunc[d] = diasAtendimento.includes(i) ? horarioBase : null; });
+
+  const clinica: Clinica = {
+    id: clinicaRow.id, nome: clinicaRow.nome, telefone: clinicaRow.telefone || '',
+    botNome: clinicaRow.bot_nome || 'Bia',
+    msgSaudacao: clinicaRow.msg_saudacao || null, msgConfirmacao: clinicaRow.msg_confirmacao || null,
+    msgCancelamento: clinicaRow.msg_cancelamento || null, msgForaHorario: clinicaRow.msg_fora_horario || null,
+    msgSemHorario: clinicaRow.msg_sem_horario || null,
+    diasAtendimento,
+    profissionais: profs.map((p: any) => ({ id: p.id, nome: p.nome, especialidade: p.especialidade, servicos: [] })),
+    servicos: servs.map((s: any) => ({ id: s.id, nome: s.nome, duracaoMinutos: s.duracao_minutos, preco: s.preco })),
+    horarioFuncionamento: horFunc,
+  };
+
+  // ── Load conversation state ──
+  const salva = await buscarConversa(clinica.id, phone);
+  const ctx = criarContextoInicial(clinica);
+  if (salva) {
+    if (salva.etapa === 'handoff_humano') {
+      logger.info('Conversa em handoff, ignorando bot', { phone });
+      return;
+    }
+    ctx.etapa = salva.etapa;
+    ctx.dadosColetados = salva.dadosColetados;
+    ctx.historicoMensagens = salva.historicoMensagens;
+  }
+
+  // ── Generate available slots ──
+  ctx.horariosOferecidos = gerarHorarios(
+    clinicaRow.horario_abertura, clinicaRow.horario_fechamento,
+    clinicaRow.almoco_inicio, clinicaRow.almoco_fim, diasAtendimento
+  );
+
+  // ── Filter folgas and occupied slots ──
+  const hoje = getBrazilNow();
+  const hojeStr = hoje.toISOString().split('T')[0];
+  const fimStr = new Date(hoje.getTime() + 14 * 86400000).toISOString().split('T')[0];
+
+  const [folgasR, ocupadosR, antigosR] = await Promise.all([
+    supabase.from('folgas').select('data, profissional_id').eq('clinica_id', clinica.id).gte('data', hojeStr),
+    getOcupadosPorProfissional(clinica.id, hojeStr + 'T00:00:00', fimStr + 'T23:59:59'),
+    supabase.from('agendamentos').select('*, profissionais(nome)').eq('clinica_id', clinica.id).eq('paciente_telefone', phone).order('created_at', { ascending: false }).limit(5),
+  ]);
+
+  // Filter folgas (only remove day if ALL professionals are on leave)
+  if (folgasR.data && folgasR.data.length > 0) {
+    ctx.horariosOferecidos = ctx.horariosOferecidos.filter((dia) => {
+      const pf = folgasR.data!.filter((f: any) => f.data === dia.data);
+      return pf.length < clinica.profissionais.length;
+    });
+  }
+
+  // Multi-professional filter: only remove slot if ALL professionals are occupied at that time
+  if (ocupadosR.length > 0) {
+    ctx.horariosOferecidos = filtrarOcupadosMultiProf(ctx.horariosOferecidos, ocupadosR, clinica.profissionais.length);
+  }
+
+  // Patient history
+  let hist: string | undefined;
+  const antigos = antigosR.data || [];
+  if (antigos.length > 0) {
+    hist = antigos.map((a: any) => `- ${a.paciente_nome || 'Paciente'} com ${(a.profissionais as any)?.nome || '?'} em ${new Date(a.data_hora).toLocaleDateString('pt-BR')}`).join('\n');
+  }
+
+  // ── Process with AI ──
+  const resultado = await processarMensagem(texto, ctx, hist);
+
+  // ── Handle special states AFTER AI response ──
+
+  // CANCELAMENTO: only execute AFTER AI confirms
+  if (resultado.contexto.dadosColetados.intencao === 'cancelar' &&
+      (resultado.resposta.toLowerCase().includes('cancelad') || resultado.resposta.toLowerCase().includes('desmarcad'))) {
+    const cancelled = await cancelarAgendamentoPaciente(clinica.id, phone);
+    if (cancelled) {
+      logger.info('Agendamento cancelado via bot', { phone, clinica: clinica.nome });
+    }
+    await enviarMensagem(phone, resultado.resposta, instanceName);
+    await limparConversa(clinica.id, phone);
+    return;
+  }
+
+  // HANDOFF: mark for human and stop bot
+  if (resultado.contexto.etapa === 'handoff_humano') {
+    await marcarHandoff(clinica.id, phone);
+    logger.info('Handoff para humano', { phone, clinica: clinica.nome });
+    await enviarMensagem(phone, resultado.resposta, instanceName);
+    return;
+  }
+
+  // Save conversation
+  await salvarConversa(clinica.id, phone, {
+    etapa: resultado.contexto.etapa,
+    dadosColetados: resultado.contexto.dadosColetados as Record<string, unknown>,
+    historicoMensagens: resultado.contexto.historicoMensagens,
+  });
+
+  // Send response
+  await enviarMensagem(phone, resultado.resposta, instanceName);
+
+  // ── Create appointment if concluded ──
+  if (resultado.contexto.etapa === 'agendamento_concluido') {
+    try {
+      const d = resultado.contexto.dadosColetados;
+      logger.info('AGENDAMENTO INICIANDO', { profissional: String(d.profissional || ''), data: String(d.data || ''), horario: String(d.horario || ''), paciente: String(d.pacienteNome || ''), profsDB: clinica.profissionais.map(p => p.nome).join(', ') });
+
+      let prof = clinica.profissionais.find(p => {
+        const np = p.nome.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        const b = (d.profissional || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        if (!b) return false;
+        if (np.includes(b) || b.includes(np)) return true;
+        const words = b.replace(/^(doutora?|dra?\.?|doutor|dr\.?)\s*/i, '').split(/\s+/).filter(Boolean);
+        return words.length > 0 && words.every(w => np.includes(w));
+      });
+      // Fallback: if only 1 professional exists, use them
+      if (!prof && clinica.profissionais.length === 1) prof = clinica.profissionais[0];
+      // Fallback: if profissional name partially matches any
+      if (!prof && d.profissional) {
+        const bWords = (d.profissional || '').toLowerCase().replace(/^(doutora?|dra?\.?|doutor|dr\.?)\s*/i, '').split(/\s+/).filter(Boolean);
+        prof = clinica.profissionais.find(p => bWords.some(w => p.nome.toLowerCase().includes(w)));
+      }
+
+      const serv = clinica.servicos.find(s => (d.servico || '').toLowerCase().includes(s.nome.toLowerCase()));
+      const duracao = serv ? serv.duracaoMinutos : (clinica.servicos[0]?.duracaoMinutos || 30);
+      const dt = resolverDataHora(d.data, d.horario);
+
+      logger.info('AGENDAMENTO RESOLVE', { dt: String(dt || 'NULL'), profFound: !!prof, profNome: String(prof?.nome || 'NONE') });
+
+      if (dt && prof) {
+        await criarAgendamento({ clinicaId: clinica.id, profissionalId: prof.id, pacienteNome: d.pacienteNome || 'Paciente', pacienteTelefone: phone, dataHora: dt, duracaoMinutos: duracao });
+        await limparConversa(clinica.id, phone);
+        logger.info('Agendamento salvo', { clinica: clinica.nome, prof: prof.nome, dt });
+      } else {
+        logger.warn('AGENDAMENTO FALHOU', { dtNull: !dt, profNull: !prof, data: String(d.data || ''), horario: String(d.horario || ''), profissional: String(d.profissional || '') });
+      }
+    } catch (e) { logger.error('Erro agendamento', { error: (e as Error).message }); }
+  }
+}
 
 router.get('/webhook', (_: Request, res: Response) => { res.json({ status: 'ok' }); });
 
@@ -233,9 +290,9 @@ function gerarHorarios(ab?: string, fe?: string, ai?: string, af?: string, diasA
   const dias: HorarioDisponivel[] = [];
   const nomes = ['Domingo', 'Segunda', 'Terca', 'Quarta', 'Quinta', 'Sexta', 'Sabado'];
   const hoje = getBrazilNow();
-  for (let i = 1; i <= 14; i++) { // FIX #11: 14 dias em vez de 7
+  for (let i = 1; i <= 14; i++) {
     const d = new Date(hoje.getTime() + i * 86400000);
-    if (!diasAtend.includes(d.getDay())) continue; // Configurable working days!
+    if (!diasAtend.includes(d.getDay())) continue;
     const horarios: string[] = [];
     for (let h = hI; h < hF; h++) { if (h >= hAI && h < hAF) continue; horarios.push(String(h).padStart(2, '0') + ':00'); horarios.push(String(h).padStart(2, '0') + ':30'); }
     dias.push({ data: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`, diaSemana: nomes[d.getDay()], horarios });
@@ -245,16 +302,13 @@ function gerarHorarios(ab?: string, fe?: string, ai?: string, af?: string, diasA
 
 /** Multi-professional: only remove slot if ALL professionals are busy at that time */
 function filtrarOcupadosMultiProf(horarios: HorarioDisponivel[], ocupados: any[], totalProfs: number): HorarioDisponivel[] {
-  if (totalProfs <= 0) return horarios; // FIX #12: guard 0 profs
+  if (totalProfs <= 0) return horarios;
 
-  // Count how many professionals are busy at each slot
   const slotCount: Record<string, number> = {};
   ocupados.forEach(e => {
-    // FIX #2: Extract time from ISO string directly (timezone-safe)
-    // data_hora format: "2026-04-05T09:00:00-03:00" — we want "09:00", not UTC getHours()
     const iso = String(e.data_hora);
-    const dateStr = iso.substring(0, 10);              // "2026-04-05"
-    const timeStr = iso.substring(11, 16);             // "09:00"
+    const dateStr = iso.substring(0, 10);
+    const timeStr = iso.substring(11, 16);
     const key = `${dateStr}_${timeStr}`;
     slotCount[key] = (slotCount[key] || 0) + 1;
   });
@@ -263,7 +317,7 @@ function filtrarOcupadosMultiProf(horarios: HorarioDisponivel[], ocupados: any[]
     ...dia,
     horarios: dia.horarios.filter(h => {
       const key = `${dia.data}_${h}`;
-      return (slotCount[key] || 0) < totalProfs; // Only remove if ALL profs are busy
+      return (slotCount[key] || 0) < totalProfs;
     }),
   })).filter(dia => dia.horarios.length > 0);
 }

@@ -50,7 +50,7 @@ export function buildSystemPrompt(clinica: Clinica, horarios: string, historico?
 'PROFISSIONAIS DISPONÍVEIS:\n' + profs + '\n\n' +
 'SERVIÇOS OFERECIDOS:\n' + servs + '\n\n' +
 
-'HORÁRIOS DISPONÍVEIS (próximos 7 dias):\n' + (horarios || 'Nenhum horário carregado no momento.') + '\n\n' +
+'HORÁRIOS DISPONÍVEIS (próximos 14 dias):\n' + (horarios || 'Nenhum horário carregado no momento.') + '\n\n' +
 
 (historico ? '═══════════════════════════════════\nHISTÓRICO DO PACIENTE\n═══════════════════════════════════\nEste paciente já veio antes:\n' + historico + '\nSe você já sabe o nome dele pelo histórico, use naturalmente sem pedir de novo.\n\n' : '') +
 
@@ -79,6 +79,19 @@ export function buildSystemPrompt(clinica: Clinica, horarios: string, historico?
 '- {abertura} → ' + (clinica.horarioFuncionamento.segunda ? clinica.horarioFuncionamento.segunda.inicio : '08:00') + '\n' +
 '- {fechamento} → ' + (clinica.horarioFuncionamento.segunda ? clinica.horarioFuncionamento.segunda.fim : '18:00') + '\n' +
 'Quando encontrar essas variáveis nas mensagens personalizadas, SUBSTITUA pelos valores reais.\n\n' +
+
+'═══════════════════════════════════\n' +
+'INTELIGÊNCIA CONVERSACIONAL\n' +
+'═══════════════════════════════════\n' +
+'- Se o paciente enviou múltiplas mensagens seguidas (separadas por quebra de linha), considere TODAS juntas como uma única mensagem\n' +
+'- NUNCA repita uma pergunta que o paciente já respondeu na conversa\n' +
+'- Se o paciente já deu o nome, profissional, data ou horário em mensagens anteriores, USE essa informação — não peça de novo\n' +
+'- Se a mensagem contém múltiplas informações (ex: "quero terça às 15h com dr fulano"), processe TUDO de uma vez e avance várias etapas\n' +
+'- Avance no fluxo o mais rápido possível — se já tem todas as informações, pule direto para a confirmação\n' +
+'- NUNCA faça perguntas uma de cada vez se o paciente já deu várias informações juntas\n' +
+'- Respostas curtas e diretas, sem enrolação — o paciente está no WhatsApp, não num email\n' +
+'- Se o paciente responde "sim", "pode ser", "isso", "esse mesmo" — interprete como confirmação do que foi sugerido\n' +
+'- Se algo ficou ambíguo, peça esclarecimento de forma breve e natural\n\n' +
 
 '═══════════════════════════════════\n' +
 'PERSONALIDADE E TOM\n' +
@@ -309,9 +322,21 @@ export function buildExtractionPrompt(): string {
 '- "sou o Carlos" → pacienteNome: "Carlos"\n' +
 '- Se a mensagem inteira parece ser só um nome próprio, extraia como pacienteNome\n\n' +
 
+'═══ MENSAGENS COM CONTEXTO ═══\n' +
+'A mensagem pode vir com CONTEXTO DA CONVERSA anterior. Use o contexto para interpretar melhor:\n' +
+'- "sim", "pode ser", "isso", "esse", "ok", "bora" → olhe o contexto para entender a intenção real\n' +
+'- Se o bot perguntou qual profissional e o paciente respondeu um nome → extraia como profissional\n' +
+'- Se o bot perguntou qual dia/horário e o paciente respondeu → extraia como data/horario\n' +
+'- Se o bot pediu confirmação e o paciente disse "sim" → mantenha a intenção "agendar"\n' +
+'- Se o bot perguntou o nome e o paciente respondeu → extraia como pacienteNome\n' +
+'- "não", "nao" após pergunta de confirmação → "outro" (paciente quer mudar algo)\n' +
+'- Se o paciente mandou múltiplas linhas (mensagens seguidas), extraia TODOS os dados de todas as linhas\n\n' +
+
 '═══ EXEMPLOS ═══\n' +
 '"eu quero as 4 da tarde" → {"intencao":"agendar","profissional":null,"servico":null,"data":null,"horario":"16:00","periodo":"tarde","pacienteNome":null}\n' +
 '"dia 3 as 4 da tarde com dr lindomar" → {"intencao":"agendar","profissional":"lindomar","servico":null,"data":"dia 3","horario":"16:00","periodo":"tarde","pacienteNome":null}\n' +
 '"Maria Clara" → {"intencao":"outro","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":"Maria Clara"}\n' +
-'"oi" → {"intencao":"saudacao","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":null}';
+'"oi" → {"intencao":"saudacao","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":null}\n' +
+'"sim" (após bot sugerir horário) → {"intencao":"agendar","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":null}\n' +
+'"pode ser" (após bot perguntar profissional) → {"intencao":"agendar","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":null}';
 }
