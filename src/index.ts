@@ -8,6 +8,7 @@ import onboardingRoutes from './onboarding/routes';
 import evolutionRoutes from './evolution/routes';
 import notificationRoutes from './notifications/routes';
 import exportRoutes from './export/routes';
+import cacheRoutes from './cache/routes';
 
 const app = express();
 app.set('trust proxy', 1);
@@ -52,6 +53,7 @@ app.use(onboardingRoutes);
 app.use(evolutionRoutes);
 app.use(notificationRoutes);
 app.use(exportRoutes);
+app.use(cacheRoutes);
 
 app.use(errorHandler);
 

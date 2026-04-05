@@ -43,6 +43,7 @@ export async function processarMensagem(
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 1024,
+      temperature: 0.7, // Lower temp → more consistent responses, still natural
       system: buildSystemPrompt(contexto.clinica, horariosTexto, historico),
       messages: ctx.historicoMensagens.slice(-20).map(m => ({
         role: m.role as 'user' | 'assistant', content: m.content,

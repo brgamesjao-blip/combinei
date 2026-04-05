@@ -16,6 +16,24 @@ function getBrazilNow(): Date {
   return new Date(now.getTime() - 3 * 3600000);
 }
 
+// Emergency keywords — escalate immediately to human + recommend emergency services
+const EMERGENCY_KEYWORDS = [
+  'emergencia', 'socorro', 'urgente', 'urgencia',
+  'dor forte', 'dor muito forte', 'muita dor',
+  'nao consigo respirar', 'falta de ar',
+  'desmaiei', 'desmaiando', 'desmaio',
+  'sangrando muito', 'muito sangue',
+  'ataque cardiaco', 'infarto', 'avc', 'derrame',
+  'passando muito mal', 'muito mal'
+];
+
+function detectEmergency(text: string): boolean {
+  const normalized = text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  return EMERGENCY_KEYWORDS.some(kw => normalized.includes(kw));
+}
+
+const EMERGENCY_RESPONSE = 'Parece que é uma situação de emergência! 🚨\n\nPor favor, ligue AGORA para o SAMU: 192\nOu vá imediatamente ao pronto-socorro mais próximo.\n\nVou avisar nossa equipe também. Cuida de você!';
+
 // Idempotency: deduplicate messages (5 min TTL)
 const processedMessages = new Map<string, number>();
 setInterval(() => { const cut = Date.now() - 300000; for (const [k, v] of processedMessages) { if (v < cut) processedMessages.delete(k); } }, 60000);
@@ -122,6 +140,18 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
 
   if (texts.length > 1) {
     logger.info('Batch processado', { phone, msgCount: texts.length });
+  }
+
+  // ── Emergency detection: skip AI, escalate immediately ──
+  if (detectEmergency(texto)) {
+    logger.warn('EMERGÊNCIA DETECTADA', { phone });
+    // Load clinic just to mark handoff
+    const { data: cl } = await supabase.from('clinicas').select('id, nome').eq('phone_number_id', instanceName).eq('ativa', true).single();
+    if (cl) {
+      try { await marcarHandoff(cl.id, phone); } catch {}
+    }
+    await enviarMensagem(phone, EMERGENCY_RESPONSE, instanceName);
+    return;
   }
 
   // ── Load clinic data (WITH CACHE) ──
@@ -250,7 +280,7 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
     }).join('\n');
   }
 
-  // ── Build additional context (stale note, pushName) for system prompt ──
+  // ── Build additional context (stale note, pushName, returning patient) for system prompt ──
   let histFinal = hist || '';
   if (staleNote) {
     histFinal = staleNote + (histFinal ? '\n\n' + histFinal : '');
@@ -259,6 +289,15 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
     histFinal = (histFinal ? histFinal + '\n\n' : '') +
       'Nome no perfil do WhatsApp deste paciente: ' + pushName +
       '. Ao pedir o nome completo, sugira: "Seu nome é ' + pushName + '?" — se confirmar, use sem pedir de novo.';
+  }
+  // Returning patient: suggest last professional if no new one has been chosen
+  if (antigos.length > 0 && !ctx.dadosColetados.profissional) {
+    const lastConfirmed = antigos.find((a: any) => a.status === 'confirmado' || a.status === 'concluido' || a.status === 'cancelado');
+    const lastProf = lastConfirmed ? (lastConfirmed.profissionais as any)?.nome : null;
+    if (lastProf) {
+      histFinal = (histFinal ? histFinal + '\n\n' : '') +
+        'PACIENTE RETORNANDO: A última consulta desse paciente foi com ' + lastProf + '. Se ele quiser agendar sem especificar profissional, pergunte "Quer agendar com ' + lastProf + ' de novo?" como primeira sugestão.';
+    }
   }
 
   // ── Process with AI ──
@@ -355,10 +394,29 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
       logger.info('AGENDAMENTO RESOLVE', { dt: String(dt || 'NULL'), profFound: !!prof, profNome: String(prof?.nome || 'NONE') });
 
       if (dt && prof) {
+        // Defense in depth: validate appointment time isn't in lunch break
+        const lunchStart = clinicaRow.almoco_inicio;
+        const lunchEnd = clinicaRow.almoco_fim;
+        if (lunchStart && lunchEnd && d.horario) {
+          const [apptH, apptM] = String(d.horario).split(':').map(Number);
+          const [lsH, lsM] = String(lunchStart).split(':').map(Number);
+          const [leH, leM] = String(lunchEnd).split(':').map(Number);
+          const apptMins = apptH * 60 + apptM;
+          const lsMins = lsH * 60 + lsM;
+          const leMins = leH * 60 + leM;
+          if (apptMins >= lsMins && apptMins < leMins) {
+            logger.warn('Tentativa de agendamento no horário de almoço', { phone, horario: String(d.horario) });
+            await enviarMensagem(phone, 'Ops, esse horário cai no nosso intervalo de almoço! Pode escolher outro?', instanceName);
+            return;
+          }
+        }
+
         try {
           await criarAgendamento({ clinicaId: clinica.id, profissionalId: prof.id, pacienteNome: d.pacienteNome || pushName || 'Paciente', pacienteTelefone: phone, dataHora: dt, duracaoMinutos: duracao });
           await limparConversa(clinica.id, phone);
           logger.info('Agendamento salvo', { clinica: clinica.nome, prof: prof.nome, dt });
+          // Friendly follow-up message to close the interaction
+          await enviarMensagem(phone, 'Precisa de mais alguma coisa? 😊', instanceName);
         } catch (err) {
           // Slot conflict or other DB error — notify patient so they know
           logger.warn('Conflito ao criar agendamento', { error: (err as Error).message, phone, dt });
