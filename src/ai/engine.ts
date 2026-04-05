@@ -20,7 +20,10 @@ export async function processarMensagem(
     historicoMensagens: [...contexto.historicoMensagens],
   };
 
-  if (dados.intencao) ctx.dadosColetados.intencao = dados.intencao;
+  // Preserve more specific intents: don't overwrite "agendar" with "outro"
+  if (dados.intencao && (dados.intencao !== 'outro' || !ctx.dadosColetados.intencao)) {
+    ctx.dadosColetados.intencao = dados.intencao;
+  }
   if (dados.profissional) ctx.dadosColetados.profissional = dados.profissional;
   if (dados.data) ctx.dadosColetados.data = dados.data;
   if (dados.horario) ctx.dadosColetados.horario = dados.horario;
@@ -90,6 +93,10 @@ async function extrairDados(
   msg: string,
   recentMessages?: Array<{ role: string; content: string }>
 ): Promise<DadosExtraidos> {
+  // Skip extraction for pure media markers (confuse the extraction model)
+  if (msg.trim().startsWith('[O paciente enviou') && msg.trim().endsWith(']')) {
+    return { intencao: 'outro' };
+  }
   try {
     // Build user message with conversation context for better understanding
     let userMsg = msg;

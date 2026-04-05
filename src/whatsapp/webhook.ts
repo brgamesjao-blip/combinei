@@ -117,13 +117,20 @@ async function processarLote(phone: string, texts: string[], instanceName: strin
   if (!clinicaRow) {
     const { data: byInst } = await supabase.from('clinicas').select('*').eq('phone_number_id', instanceName).eq('ativa', true).single();
     clinicaRow = byInst;
+    // Fallback ONLY if there's exactly 1 active clinic (dev/single-tenant scenario)
+    // Never route to a random clinic when multiple exist — security risk
     if (!clinicaRow) {
-      const { data: first } = await supabase.from('clinicas').select('*').eq('ativa', true).limit(1).single();
-      clinicaRow = first;
+      const { data: all } = await supabase.from('clinicas').select('*').eq('ativa', true).limit(2);
+      if (all && all.length === 1) {
+        clinicaRow = all[0];
+      }
     }
     if (clinicaRow) clinicaCache.set(instanceName, clinicaRow);
   }
-  if (!clinicaRow) return;
+  if (!clinicaRow) {
+    logger.warn('Webhook sem clínica correspondente', { instance: instanceName });
+    return;
+  }
 
   // Cached professionals & services
   let profs = profsCache.get(clinicaRow.id);
@@ -261,11 +268,11 @@ async function processarLote(phone: string, texts: string[], instanceName: strin
     return;
   }
 
-  // Save conversation
+  // Save conversation (trim history to last 30 messages to prevent unbounded growth)
   await salvarConversa(clinica.id, phone, {
     etapa: resultado.contexto.etapa,
     dadosColetados: resultado.contexto.dadosColetados as Record<string, unknown>,
-    historicoMensagens: resultado.contexto.historicoMensagens,
+    historicoMensagens: resultado.contexto.historicoMensagens.slice(-30),
   });
 
   // Send response
@@ -300,9 +307,15 @@ async function processarLote(phone: string, texts: string[], instanceName: strin
       logger.info('AGENDAMENTO RESOLVE', { dt: String(dt || 'NULL'), profFound: !!prof, profNome: String(prof?.nome || 'NONE') });
 
       if (dt && prof) {
-        await criarAgendamento({ clinicaId: clinica.id, profissionalId: prof.id, pacienteNome: d.pacienteNome || 'Paciente', pacienteTelefone: phone, dataHora: dt, duracaoMinutos: duracao });
-        await limparConversa(clinica.id, phone);
-        logger.info('Agendamento salvo', { clinica: clinica.nome, prof: prof.nome, dt });
+        try {
+          await criarAgendamento({ clinicaId: clinica.id, profissionalId: prof.id, pacienteNome: d.pacienteNome || pushName || 'Paciente', pacienteTelefone: phone, dataHora: dt, duracaoMinutos: duracao });
+          await limparConversa(clinica.id, phone);
+          logger.info('Agendamento salvo', { clinica: clinica.nome, prof: prof.nome, dt });
+        } catch (err) {
+          // Slot conflict or other DB error — notify patient so they know
+          logger.warn('Conflito ao criar agendamento', { error: (err as Error).message, phone, dt });
+          await enviarMensagem(phone, 'Ops, esse horário acabou de ser preenchido por outro paciente! Pode escolher outro horário?', instanceName);
+        }
       } else {
         logger.warn('AGENDAMENTO FALHOU', { dtNull: !dt, profNull: !prof, data: String(d.data || ''), horario: String(d.horario || ''), profissional: String(d.profissional || '') });
       }
