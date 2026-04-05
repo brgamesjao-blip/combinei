@@ -11,6 +11,10 @@ function sanitize(data?: Record<string, unknown>): Record<string, unknown> {
       safe[key] = maskPhone(String(value || ''));
     } else if (['message', 'texto', 'mensagem', 'content'].includes(key)) {
       safe[key] = String(value || '').substring(0, 30) + '...';
+    } else if (['paciente', 'pacienteNome', 'paciente_nome'].includes(key)) {
+      // Mask patient name to first name only (reduce PII in logs)
+      const name = String(value || '');
+      safe[key] = name.split(' ')[0] || '***';
     } else {
       safe[key] = value;
     }

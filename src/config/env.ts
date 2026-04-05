@@ -17,3 +17,10 @@ export const env = {
   NOTIFICATION_API_KEY: process.env.NOTIFICATION_API_KEY || '',
   CONVERSATION_TIMEOUT_HOURS: Number(process.env.CONVERSATION_TIMEOUT_HOURS) || 24,
 } as const;
+
+// Validate critical env vars at startup — warn loudly if missing (don't crash to allow healthcheck)
+const required: Array<keyof typeof env> = ['ANTHROPIC_API_KEY', 'SUPABASE_URL', 'SUPABASE_SERVICE_KEY', 'EVOLUTION_API_URL', 'EVOLUTION_API_KEY', 'WEBHOOK_SECRET'];
+const missing = required.filter(k => !env[k]);
+if (missing.length > 0) {
+  console.error(JSON.stringify({ level: 'error', ts: new Date().toISOString(), msg: 'CRITICAL: missing env vars', missing }));
+}
