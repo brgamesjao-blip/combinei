@@ -6,7 +6,6 @@ import { logger } from '../utils/logger';
 import { withCircuitBreaker } from '../utils/circuitBreaker';
 
 const anthropic = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
-const FALLBACK_MSG = 'Desculpa, estou com um probleminha técnico. Pode tentar de novo em alguns minutos?';
 
 // Extraction prompt é constante — cacheia uma vez no module load
 const EXTRACTION_PROMPT = buildExtractionPrompt();
@@ -57,6 +56,8 @@ export async function processarMensagem(
 
   // Prompt caching: bloco estático (clínica + regras) é cacheado por 5min.
   // Dinâmico (data/hora, slots, histórico) muda a cada call e fica fora do cache.
+  // Sem fallback no circuit breaker: erro propaga pro processarLote que diferencia
+  // por tipo (rate limit, auth, 5xx, timeout, etc) e responde mensagem específica.
   const resposta = await withCircuitBreaker<string>('anthropic-chat', async () => {
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
@@ -69,7 +70,7 @@ export async function processarMensagem(
       messages: messagesForAI,
     });
     return response.content[0].type === 'text' ? response.content[0].text : '';
-  }, FALLBACK_MSG);
+  });
 
   logger.debug('AI RESPONSE', { response: resposta.substring(0, 300) });
 

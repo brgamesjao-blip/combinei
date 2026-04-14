@@ -249,14 +249,29 @@ async function processarLote(phone: string, texts: string[], instanceName: strin
     await processarLoteInner(phone, texts, instanceName, pushName, reqId);
   } catch (e) {
     const errMsg = (e as Error).message?.toLowerCase() || '';
-    logger.error('Erro fatal no processarLote', { error: (e as Error).message, phone, reqId });
-    // Specific error messages for different failure types
+    const errStatus = Number((e as { status?: number; response?: { status?: number } }).status
+      || (e as { status?: number; response?: { status?: number } }).response?.status
+      || 0);
+    logger.error('Erro fatal no processarLote', { error: (e as Error).message, status: errStatus, phone, reqId });
+
+    // Mensagem diferenciada por tipo de erro — paciente sabe se vale tentar logo,
+    // esperar um pouco, ou se é problema do nosso lado.
     let userMsg = 'Desculpa, tive um probleminha aqui. Pode tentar de novo em alguns segundos?';
-    if (errMsg.includes('anthropic') || errMsg.includes('claude') || errMsg.includes('circuit')) {
-      userMsg = 'Tô pensando um pouco devagar agora... pode tentar de novo em alguns segundos?';
+    if (errStatus === 429 || errMsg.includes('rate limit') || errMsg.includes('too many requests')) {
+      userMsg = 'Tô recebendo muita mensagem agora! Espera uns 30 segundos e tenta de novo, por favor 🙏';
+    } else if (errStatus === 401 || errStatus === 403) {
+      userMsg = 'Tô com um probleminha de configuração aqui. Já avisei o pessoal! Tenta em alguns minutos.';
+    } else if (errStatus === 529 || errMsg.includes('overloaded')) {
+      userMsg = 'Tô meio sobrecarregada agora! Pode tentar de novo em 1 minutinho?';
+    } else if (errStatus >= 500 && errStatus < 600) {
+      userMsg = 'Tô com um problema temporário do meu lado. Tenta de novo em 1 minutinho?';
+    } else if (errMsg.includes('circuit')) {
+      userMsg = 'Tô meio sobrecarregada agora! Tenta de novo em 1 minutinho, por favor.';
+    } else if (errMsg.includes('anthropic') || errMsg.includes('claude')) {
+      userMsg = 'Tô pensando um pouco devagar agora... tenta de novo em alguns segundos?';
     } else if (errMsg.includes('supabase') || errMsg.includes('database') || errMsg.includes('pgrst') || errMsg.includes('postgres')) {
-      userMsg = 'Tô com um probleminha no sistema. Pode tentar de novo em 1 minutinho?';
-    } else if (errMsg.includes('timeout') || errMsg.includes('etimedout')) {
+      userMsg = 'Tô com um probleminha no sistema. Tenta de novo em 1 minutinho?';
+    } else if (errMsg.includes('timeout') || errMsg.includes('etimedout') || errMsg.includes('aborted')) {
       userMsg = 'Demorei demais pra responder, me manda de novo?';
     }
     try {
