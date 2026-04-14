@@ -209,7 +209,7 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
         else if (data.message.contactMessage) texto = '[O paciente enviou um contato]';
       }
     }
-    if (!texto) {
+    if (!texto || !texto.trim()) {
       logger.debug('Mensagem sem texto ou tipo conhecido, ignorada', { phone, types: Object.keys(data.message || {}) });
       return;
     }
