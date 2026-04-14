@@ -8,22 +8,24 @@
 
 ## Arquitetura
 - src/index.ts — Express server, CORS skip pra /webhook, graceful shutdown (SIGTERM/SIGINT)
-- src/whatsapp/webhook.ts — Recebe mensagens da Evolution API, batching de 3s, processa com AI, agenda
+- src/whatsapp/webhook.ts — Recebe mensagens da Evolution API, batching de 3s + serialização por batchKey, processa com AI, agenda
 - src/whatsapp/client.ts — Envia mensagens via Evolution API com typing indicator + retries
-- src/ai/engine.ts — Processa mensagens, extração com contexto (últimas 6 msgs), detecção de conclusão
-- src/ai/prompts.ts — System prompt pro bot + extraction prompt (com inteligência conversacional)
+- src/ai/engine.ts — Processa mensagens, extração com contexto (últimas 6 msgs), detecção de conclusão, prompt caching
+- src/ai/prompts.ts — buildSystemPrompt retorna { static, dynamic } pra cache; extraction prompt
 - src/db/client.ts — Supabase service_role client + CRUD functions
 - src/evolution/routes.ts — Criar instância, QR code, status (SEMPRE inclui webhook secret)
 - src/middleware/validateWebhook.ts — Valida apikey header com timingSafeEqual
 - src/middleware/auth.ts — JWT auth via Supabase getUser()
 - src/middleware/rateLimit.ts — Rate limit per IP (webhook: 300/min, api: 30/min, evolution: 10/min)
-- src/notifications/routes.ts — Lembretes 24h (cron via UptimeRobot)
+- src/notifications/routes.ts — Lembretes 24h + cleanup com aviso ao paciente (cron via UptimeRobot)
 - src/export/routes.ts — CSV export de agendamentos/financeiro
 - src/cache/routes.ts — POST /api/cache/invalidate (dashboard chama quando salvar mudanças)
 - src/config/env.ts — Env vars com validação de críticas no startup
 - src/utils/logger.ts — JSON structured logging com sanitização (phone mascarado, nome só primeiro)
 - src/utils/cache.ts — TtlCache com 60s TTL (clinica, profissionais, serviços)
 - src/utils/circuitBreaker.ts — Circuit breaker pra chamadas Anthropic
+- src/utils/matchers.ts — matchProfissional com 3 tiers (exato/substring/palavras) + detecção de ambiguidade
+- src/utils/parseHorario.ts — Parser robusto: dígito, extenso ("duas e meia"), "meio dia", "meia noite"
 
 ## Regras críticas
 - NUNCA remover o CORS skip pra /webhook (Evolution API não envia Origin)
@@ -38,6 +40,34 @@
 - Profissional é re-extraído da resposta do AI (corrige erros de dadosColetados)
 - Agendamento é criado DEPOIS de enviar confirmação — se falhar, envia follow-up pro paciente
 - Histórico de conversa podado em 30 mensagens ao salvar no DB
+
+## Features implementadas (sessão 14 abril 2026)
+
+### Robustez crítica
+- **Race em criarAgendamento**: partial UNIQUE INDEX em (profissional_id, data_hora) WHERE status='confirmado' (migration 002). Função detecta erro 23505 e re-throw mensagem clara
+- **Stale conversation (>2h)**: limpa dadosColetados de booking (mantém só pacienteNome) — paciente não confirma agendamento velho com "sim"
+- **JSON parsing robusto**: fallback regex {...} se parse direto falha, valida intencao contra enum, log estruturado
+- **Profissional ambíguo**: matchProfissional helper detecta dois Joãos. Bot pergunta "Tem mais de um profissional aqui com esse nome: Dr. João Silva ou Dr. João Pereira. Com qual?"
+
+### Robustez média
+- **Serialização de batch por batchKey**: Promise chain garante que processarLote do mesmo paciente nunca roda em paralelo
+- **Parser de horário robusto**: suporta "duas e meia", "meio dia", "meia noite", "vinte e duas", "treze horas"
+- **Dashboard webhook com retry**: 3 tentativas exponenciais (1s/2s/4s), timeout 5s, log estruturado em falha
+- **Logs pra mensagens ignoradas**: grupos (warn), status/newsletter (debug), reactions/edits/polls (info) + suporte a location/contact + truncamento >2000 chars
+
+### Performance
+- **Prompt caching** (Sonnet + Haiku): system prompt dividido em static (cacheable) + dynamic. Estimativa: ~80-90% economia de input tokens em chamadas dentro de 5min
+
+### UX
+- **Cleanup com aviso**: limparConversasAntigas tem callback onBeforeDelete. Cron envia "sua conversa expirou — me chama de novo" antes de deletar
+- **Erros diferenciados**: 429/rate limit, 401/403, 529/overloaded, 5xx, circuit, timeout, anthropic, supabase — cada um com mensagem específica pro paciente saber se vale tentar logo ou esperar
+
+### ⚠️ Pendente
+- Migration `002_unique_appointment_slot.sql` precisa ser aplicada manualmente no Supabase Dashboard. Antes, conferir duplicatas com:
+  ```sql
+  SELECT profissional_id, data_hora, COUNT(*) FROM agendamentos
+  WHERE status='confirmado' GROUP BY 1,2 HAVING COUNT(*) > 1;
+  ```
 
 ## Features implementadas (sessão 5-8 abril 2026)
 
