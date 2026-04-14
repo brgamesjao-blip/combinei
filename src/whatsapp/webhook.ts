@@ -7,23 +7,51 @@ import { validateWebhook } from '../middleware/validateWebhook';
 import { webhookLimiter } from '../middleware/rateLimit';
 import { logger } from '../utils/logger';
 import { clinicaCache, profsCache, servsCache } from '../utils/cache';
+import { matchProfissional, formatProfList } from '../utils/matchers';
+import { parseHorario } from '../utils/parseHorario';
 import { env } from '../config/env';
 import crypto from 'crypto';
 
-/** Fire-and-forget webhook to dashboard — never blocks or fails the main flow */
+/** Tenta POST com retry exponencial (1s, 2s, 4s) e timeout 5s por tentativa. */
+async function postDashboardWithRetry(url: string, payload: Record<string, unknown>, maxRetries = 3): Promise<void> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) return;
+      lastError = new Error(`HTTP ${res.status}`);
+    } catch (e) {
+      lastError = e;
+    }
+    if (attempt < maxRetries - 1) {
+      await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt)));
+    }
+  }
+  logger.error('Dashboard webhook falhou após retries', {
+    error: (lastError as Error)?.message || String(lastError),
+    type: String(payload.type || ''),
+    clinicaId: String(payload.clinicaId || ''),
+  });
+}
+
+/** Fire-and-forget no caller — não bloqueia o flow do bot, mas tenta 3x e loga falha. */
 function notifyDashboard(type: 'handoff' | 'emergency', clinicaId: string, phone: string, extra?: Record<string, unknown>): void {
   if (!env.DASHBOARD_WEBHOOK_URL) return;
-  fetch(env.DASHBOARD_WEBHOOK_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      type,
-      clinicaId,
-      phone,
-      timestamp: new Date().toISOString(),
-      ...extra,
-    }),
-  }).catch(() => {});
+  const payload = {
+    type,
+    clinicaId,
+    phone,
+    timestamp: new Date().toISOString(),
+    ...extra,
+  };
+  postDashboardWithRetry(env.DASHBOARD_WEBHOOK_URL, payload).catch(e =>
+    logger.error('Dashboard notify error inesperado', { error: (e as Error).message })
+  );
 }
 
 const router = Router();
@@ -66,11 +94,24 @@ const pendingBatches = new Map<string, {
 const BATCH_DELAY_MS = 3000; // Wait 3s for more messages before processing
 const MAX_BATCH_SIZE = 10; // Protect against spam / rapid-fire abuse
 
+// Serialização por batchKey: garante que duas execuções de processarLote pro
+// mesmo paciente NUNCA rodem em paralelo (evita salvarConversa concorrente
+// e processamento fora de ordem quando uma msg chega durante o processing).
+const batchProcessing = new Map<string, Promise<void>>();
+function scheduleBatch(batchKey: string, fn: () => Promise<void>): void {
+  const prev = batchProcessing.get(batchKey) || Promise.resolve();
+  const next = prev.catch(() => {}).then(fn);
+  batchProcessing.set(batchKey, next);
+  next.finally(() => {
+    if (batchProcessing.get(batchKey) === next) batchProcessing.delete(batchKey);
+  });
+}
+
 // Track in-flight processing for graceful shutdown
 let activeBatches = 0;
 export async function drainPendingBatches(maxWaitMs = 15000): Promise<void> {
   const deadline = Date.now() + maxWaitMs;
-  while ((pendingBatches.size > 0 || activeBatches > 0) && Date.now() < deadline) {
+  while ((pendingBatches.size > 0 || activeBatches > 0 || batchProcessing.size > 0) && Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 200));
   }
 }
@@ -92,13 +133,44 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
 
     const instanceName = typeof body.instance === 'object' ? (body.instance?.instanceName || body.instance?.name || '') : (body.instance || '');
     const remoteJid = data.key.remoteJid || '';
-    if (remoteJid.includes('@g.us')) return;
+    // Mensagens não-DM: log + skip (em vez de silent drop pra ajudar debug)
+    if (remoteJid.includes('@g.us')) {
+      logger.warn('Mensagem de grupo ignorada', { remoteJid, instance: instanceName });
+      return;
+    }
+    if (remoteJid.includes('status@broadcast') || remoteJid.includes('@broadcast')) {
+      logger.debug('Status broadcast ignorado', { remoteJid });
+      return;
+    }
+    if (remoteJid.includes('@newsletter')) {
+      logger.debug('Newsletter ignorado', { remoteJid });
+      return;
+    }
     const phone = remoteJid.replace('@s.whatsapp.net', '').replace('@c.us', '');
     if (!phone) return;
 
     // ── Extract text (with media support) ──
     let texto = '';
     if (data.message) {
+      // Tipos especiais: log + skip antes de tentar extrair texto
+      if (data.message.reactionMessage) {
+        logger.info('Reação ignorada', { phone, emoji: data.message.reactionMessage.text || '' });
+        return;
+      }
+      if (data.message.protocolMessage) {
+        // protocolMessage = mensagem deletada/editada/etc — ignorar silenciosamente após log
+        logger.debug('protocolMessage ignorada', { phone, type: data.message.protocolMessage.type });
+        return;
+      }
+      if (data.message.pollCreationMessage || data.message.pollUpdateMessage) {
+        logger.info('Enquete ignorada', { phone });
+        return;
+      }
+      if (data.message.editedMessage) {
+        logger.info('Mensagem editada ignorada', { phone });
+        return;
+      }
+
       texto = data.message.conversation || data.message.extendedTextMessage?.text || '';
       // Image/video with caption
       if (!texto && data.message.imageMessage?.caption) texto = data.message.imageMessage.caption;
@@ -110,9 +182,19 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
         else if (data.message.videoMessage) texto = '[O paciente enviou um vídeo]';
         else if (data.message.stickerMessage) texto = '[O paciente enviou uma figurinha]';
         else if (data.message.documentMessage) texto = '[O paciente enviou um documento]';
+        else if (data.message.locationMessage) texto = '[O paciente enviou uma localização]';
+        else if (data.message.contactMessage) texto = '[O paciente enviou um contato]';
       }
     }
-    if (!texto) return;
+    if (!texto) {
+      logger.debug('Mensagem sem texto ou tipo conhecido, ignorada', { phone, types: Object.keys(data.message || {}) });
+      return;
+    }
+    // Proteção contra mensagens absurdamente longas (DoS / acidente)
+    if (texto.length > 2000) {
+      logger.warn('Mensagem truncada (>2000 chars)', { phone, originalLen: texto.length });
+      texto = texto.substring(0, 2000);
+    }
 
     const pushName = data.pushName || '';
     logger.info('Msg recebida', { phone, instance: instanceName });
@@ -133,8 +215,10 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
       clearTimeout(existing.timer);
       existing.timer = setTimeout(() => {
         pendingBatches.delete(batchKey);
-        processarLote(phone, existing.texts, existing.instanceName, existing.pushName).catch(e =>
-          logger.error('Batch processing error', { error: (e as Error).message, phone })
+        scheduleBatch(batchKey, () =>
+          processarLote(phone, existing.texts, existing.instanceName, existing.pushName).catch(e =>
+            logger.error('Batch processing error', { error: (e as Error).message, phone })
+          )
         );
       }, BATCH_DELAY_MS);
     } else {
@@ -145,8 +229,10 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
         pushName,
         timer: setTimeout(() => {
           pendingBatches.delete(batchKey);
-          processarLote(phone, batch.texts, batch.instanceName, batch.pushName).catch(e =>
-            logger.error('Batch processing error', { error: (e as Error).message, phone })
+          scheduleBatch(batchKey, () =>
+            processarLote(phone, batch.texts, batch.instanceName, batch.pushName).catch(e =>
+              logger.error('Batch processing error', { error: (e as Error).message, phone })
+            )
           );
         }, BATCH_DELAY_MS),
       };
@@ -272,8 +358,12 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
       const gap = Date.now() - new Date(salva.updatedAt).getTime();
       if (gap > 2 * 3600000) {
         const hoursAgo = Math.floor(gap / 3600000);
-        staleNote = `ATENÇÃO: O paciente voltou após ${hoursAgo}h sem responder. Cumprimente novamente e pergunte se quer continuar o agendamento anterior ou começar de novo.`;
-        logger.info('Conversa retomada após gap', { phone, hoursAgo, reqId, stage: salva.etapa });
+        // Limpa dados de booking pra evitar que "sim" do paciente confirme um agendamento
+        // velho (profissional/data/horário stale). Mantém só identidade (pacienteNome).
+        const savedName = ctx.dadosColetados.pacienteNome;
+        ctx.dadosColetados = savedName ? { pacienteNome: savedName } : {};
+        staleNote = `ATENÇÃO: O paciente voltou após ${hoursAgo}h sem responder. Cumprimente novamente, pergunte como pode ajudar, e NÃO assuma dados de conversas anteriores — colete profissional, data e horário do zero antes de confirmar qualquer coisa.`;
+        logger.info('Conversa retomada após gap, dadosColetados limpos', { phone, hoursAgo, reqId, stage: salva.etapa });
       }
     }
   }
@@ -354,19 +444,40 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
     resultado.resposta = 'Desculpa, tive um probleminha aqui. Pode repetir?';
   }
 
-  // If AI confirmed an appointment, extract the ACTUAL prof name from response
-  // (protects against stale/wrong profissional in dadosColetados)
+  // If AI confirmed an appointment, refine prof name from response + detect ambiguity
   if (resultado.contexto.etapa === 'agendamento_concluido') {
     const respNormalized = resultado.resposta.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-    const matchedProf = clinica.profissionais.find(p => {
+    // Conta quantos profissionais aparecem no texto da resposta. Se único, refina o
+    // dadosColetados.profissional pro nome canônico. Se múltiplos, NÃO sobrescreve
+    // (deixa o check de ambiguidade abaixo decidir com base no que veio da extração).
+    const profsInText = clinica.profissionais.filter(p => {
       const np = p.nome.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
       if (respNormalized.includes(np)) return true;
-      // Try individual words (e.g. response says "Ana" for "Dra. Ana Silva")
       const words = np.replace(/^(doutora?|dra?\.?|doutor|dr\.?)\s*/, '').split(/\s+/).filter(w => w.length > 2);
       return words.length > 0 && words.some(w => respNormalized.includes(w));
     });
-    if (matchedProf) {
-      resultado.contexto.dadosColetados.profissional = matchedProf.nome;
+    if (profsInText.length === 1) {
+      resultado.contexto.dadosColetados.profissional = profsInText[0].nome;
+    }
+
+    // Valida ambiguidade no profissional final
+    // (evita pegar "Dr. João Silva" quando paciente disse só "João" e existe "Dr. João Pereira")
+    const profMatch = matchProfissional(
+      String(resultado.contexto.dadosColetados.profissional || ''),
+      clinica.profissionais
+    );
+    if (profMatch.ambiguous) {
+      const lista = formatProfList(profMatch.candidates);
+      logger.warn('Profissional ambíguo, pedindo desambiguação', {
+        candidatos: profMatch.candidates.map(p => p.nome).join(', '),
+        query: String(resultado.contexto.dadosColetados.profissional || ''),
+        phone, reqId, stage: 'ambiguous_prof',
+      });
+      // Sobrescreve a resposta do AI (que pode ter dito "agendado!") + reseta etapa
+      // pra paciente continuar o fluxo de booking sem profissional definido.
+      resultado.resposta = `Espera só um instante! Tem mais de um profissional aqui com esse nome: ${lista}. Com qual você quer marcar?`;
+      resultado.contexto.etapa = 'inicio';
+      delete (resultado.contexto.dadosColetados as Record<string, unknown>).profissional;
     }
   }
 
@@ -417,21 +528,10 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
       const d = resultado.contexto.dadosColetados;
       logger.info('AGENDAMENTO INICIANDO', { profissional: String(d.profissional || ''), data: String(d.data || ''), horario: String(d.horario || ''), paciente: String(d.pacienteNome || ''), profsDB: clinica.profissionais.map(p => p.nome).join(', '), reqId, stage: 'agendamento_concluido' });
 
-      let prof = clinica.profissionais.find(p => {
-        const np = p.nome.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-        const b = (d.profissional || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-        if (!b) return false;
-        if (np.includes(b) || b.includes(np)) return true;
-        const words = b.replace(/^(doutora?|dra?\.?|doutor|dr\.?)\s*/i, '').split(/\s+/).filter(Boolean);
-        return words.length > 0 && words.every(w => np.includes(w));
-      });
+      const profMatch = matchProfissional(String(d.profissional || ''), clinica.profissionais);
+      let prof = profMatch.matched;
       // Fallback: if only 1 professional exists, use them
-      if (!prof && clinica.profissionais.length === 1) prof = clinica.profissionais[0];
-      // Fallback: if profissional name partially matches any
-      if (!prof && d.profissional) {
-        const bWords = (d.profissional || '').toLowerCase().replace(/^(doutora?|dra?\.?|doutor|dr\.?)\s*/i, '').split(/\s+/).filter(Boolean);
-        prof = clinica.profissionais.find(p => bWords.some(w => p.nome.toLowerCase().includes(w)));
-      }
+      if (!prof && !profMatch.ambiguous && clinica.profissionais.length === 1) prof = clinica.profissionais[0];
 
       const serv = clinica.servicos.find(s => (d.servico || '').toLowerCase().includes(s.nome.toLowerCase()));
       const duracao = serv ? serv.duracaoMinutos : (clinica.servicos[0]?.duracaoMinutos || 30);
@@ -579,12 +679,9 @@ function resolverDataHora(data?: string, horario?: string): string | null {
     else { const t = map[dl]; if (t !== undefined) { alvo = new Date(hoje); let df = t - hoje.getDay(); if (df <= 0) df += 7; alvo.setDate(hoje.getDate() + df); } }
   }
   if (!alvo) return null;
-  let h = '09', mn = '00';
-  if (horario) {
-    const fm = horario.match(/(\d{1,2}):(\d{2})/);
-    if (fm) { h = fm[1].padStart(2, '0'); mn = fm[2]; }
-    else { const sm = horario.match(/(\d{1,2})/); if (sm) { let hr = +sm[1]; if (horario.toLowerCase().includes('tarde') || horario.toLowerCase().includes('noite')) { if (hr < 12) hr += 12; } else if (!horario.toLowerCase().includes('manhã') && !horario.toLowerCase().includes('manha')) { if (hr <= 6) hr += 12; } h = String(hr).padStart(2, '0'); } if (horario.toLowerCase().includes('meia') || horario.toLowerCase().includes('30')) mn = '30'; }
-  }
+  const parsed = parseHorario(horario);
+  const h = parsed?.h ?? '09';
+  const mn = parsed?.m ?? '00';
   return `${alvo.getFullYear()}-${String(alvo.getMonth() + 1).padStart(2, '0')}-${String(alvo.getDate()).padStart(2, '0')}T${h}:${mn}:00-03:00`;
 }
 

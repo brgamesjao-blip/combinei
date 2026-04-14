@@ -103,6 +103,11 @@ export async function processarMensagem(
   return { resposta, contexto: ctx };
 }
 
+const VALID_INTENCOES: ReadonlyArray<DadosExtraidos['intencao']> = [
+  'agendar', 'remarcar', 'cancelar', 'consultar_horarios',
+  'saudacao', 'duvida', 'agradecimento', 'falar_humano', 'outro',
+];
+
 async function extrairDados(
   msg: string,
   recentMessages?: Array<{ role: string; content: string }>
@@ -111,6 +116,7 @@ async function extrairDados(
   if (msg.trim().startsWith('[O paciente enviou') && msg.trim().endsWith(']')) {
     return { intencao: 'outro' };
   }
+  let rawText = '';
   try {
     // Build user message with conversation context for better understanding
     let userMsg = msg;
@@ -130,10 +136,44 @@ async function extrairDados(
       });
     });
     if (!r) return { intencao: 'outro' };
-    const t = r.content[0].type === 'text' ? r.content[0].text : '{}';
-    return JSON.parse(t.replace(/```json?\n?|\n?```/g, '').trim());
+    rawText = r.content[0].type === 'text' ? r.content[0].text : '{}';
+    const cleaned = rawText.replace(/```json?\n?|\n?```/g, '').trim();
+
+    let parsed: Partial<DadosExtraidos> | null = null;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch {
+      // Fallback: extrair primeiro bloco {...} se vier com texto no entorno
+      const match = cleaned.match(/\{[\s\S]*\}/);
+      if (match) {
+        try { parsed = JSON.parse(match[0]); } catch {}
+      }
+    }
+
+    if (!parsed || typeof parsed !== 'object') {
+      logger.warn('Extração JSON inválido', {
+        rawSample: rawText.substring(0, 200),
+        msgSample: msg.substring(0, 100),
+      });
+      return { intencao: 'outro' };
+    }
+
+    // Validar intencao — Haiku às vezes inventa valores fora do enum
+    const intencao = parsed.intencao as DadosExtraidos['intencao'];
+    if (typeof intencao !== 'string' || !VALID_INTENCOES.includes(intencao)) {
+      logger.warn('Extração intenção inválida', {
+        intencao: String(intencao),
+        rawSample: rawText.substring(0, 200),
+      });
+      parsed.intencao = 'outro';
+    }
+    return parsed as DadosExtraidos;
   } catch (e) {
-    logger.warn('Falha extração', { error: (e as Error).message });
+    logger.warn('Falha extração', {
+      error: (e as Error).message,
+      rawSample: rawText.substring(0, 200),
+      msgSample: msg.substring(0, 100),
+    });
     return { intencao: 'outro' };
   }
 }

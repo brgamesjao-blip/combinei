@@ -34,17 +34,23 @@ export async function criarAgendamento(a: {
     .eq('data_hora', a.dataHora).eq('status', 'confirmado').limit(1);
   if (dup && dup.length > 0) return;
 
-  // Race condition fix: check THIS PROFESSIONAL's schedule
+  // Pre-check: rápido e dá log claro nos casos não-race.
   const { data: conflict } = await supabase.from('agendamentos').select('id')
     .eq('clinica_id', a.clinicaId).eq('profissional_id', a.profissionalId)
     .eq('data_hora', a.dataHora).eq('status', 'confirmado').limit(1);
   if (conflict && conflict.length > 0) throw new Error('Horário já ocupado para este profissional');
 
-  await supabase.from('agendamentos').insert({
+  // Race window entre pre-check e insert é fechada pelo partial unique index
+  // idx_agendamentos_unique_slot (migration 002). Postgres retorna code 23505.
+  const { error } = await supabase.from('agendamentos').insert({
     clinica_id: a.clinicaId, profissional_id: a.profissionalId,
     paciente_nome: a.pacienteNome.substring(0, 200), paciente_telefone: a.pacienteTelefone,
     data_hora: a.dataHora, duracao_minutos: a.duracaoMinutos, status: 'confirmado',
   });
+  if (error) {
+    if (error.code === '23505') throw new Error('Horário já ocupado para este profissional');
+    throw new Error(`Falha ao inserir agendamento: ${error.message}`);
+  }
 }
 
 /** Cancel the most recent confirmed appointment for this patient */
