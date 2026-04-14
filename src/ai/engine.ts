@@ -117,6 +117,19 @@ export async function processarMensagem(
 }
 
 /**
+ * Mascarar valores de campos sensíveis no rawSample antes de logar.
+ * Haiku às vezes retorna JSON malformado mas com dados extraídos —
+ * pacienteNome ou profissional não devem ir parar em log de erro.
+ */
+function sanitizeRaw(s: string): string {
+  return s
+    .replace(/"pacienteNome"\s*:\s*"[^"]*"/g, '"pacienteNome":"***"')
+    .replace(/"paciente_nome"\s*:\s*"[^"]*"/g, '"paciente_nome":"***"')
+    .replace(/"profissional"\s*:\s*"[^"]*"/g, '"profissional":"***"')
+    .substring(0, 150);
+}
+
+/**
  * Detecta sinais de correção/mudança na mensagem do paciente sem novo valor.
  * Ex: "muda o profissional" sem dizer qual → deletar dadosColetados.profissional
  * pra forçar o bot a perguntar de novo em vez de confirmar com o velho.
@@ -200,7 +213,7 @@ async function extrairDados(
 
     if (!parsed || typeof parsed !== 'object') {
       logger.warn('Extração JSON inválido', {
-        rawSample: rawText.substring(0, 200),
+        rawSample: sanitizeRaw(rawText),
         msgSample: msg.substring(0, 100),
       });
       return { intencao: 'outro' };
@@ -211,7 +224,7 @@ async function extrairDados(
     if (typeof intencao !== 'string' || !VALID_INTENCOES.includes(intencao)) {
       logger.warn('Extração intenção inválida', {
         intencao: String(intencao),
-        rawSample: rawText.substring(0, 200),
+        rawSample: sanitizeRaw(rawText),
       });
       parsed.intencao = 'outro';
     }
@@ -219,7 +232,7 @@ async function extrairDados(
   } catch (e) {
     logger.warn('Falha extração', {
       error: (e as Error).message,
-      rawSample: rawText.substring(0, 200),
+      rawSample: sanitizeRaw(rawText),
       msgSample: msg.substring(0, 100),
     });
     return { intencao: 'outro' };
