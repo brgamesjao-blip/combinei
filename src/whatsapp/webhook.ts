@@ -562,11 +562,12 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
       return;
     }
 
-    // >1 agendamentos: tenta identificar qual via dados extraídos
+    // >1 agendamentos: tenta identificar qual via dados extraídos OU via ordinal na msg
     const d = resultado.contexto.dadosColetados;
     const match = matchAgendamento(
       { data: d.data, horario: d.horario, profissional: d.profissional },
-      futuros
+      futuros,
+      texto
     );
 
     if (match.matched) {
@@ -786,9 +787,26 @@ function detectarRespostaLembrete(
  */
 function matchAgendamento(
   d: { data?: string; horario?: string; profissional?: string },
-  futuros: AgendamentoFuturo[]
+  futuros: AgendamentoFuturo[],
+  msgPaciente?: string
 ): { matched: AgendamentoFuturo | null; ambiguous: boolean; candidates: AgendamentoFuturo[] } {
   if (futuros.length === 0) return { matched: null, ambiguous: false, candidates: [] };
+
+  // Suporte a ordinal na msg do paciente: "1", "primeira", "última".
+  // Cobre o caso em que a msg é só índice (sem data/hora/prof extraídos).
+  if (msgPaciente) {
+    const m = msgPaciente.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+    let idx: number | null = null;
+    if (/^[1-9]\s*$|^[1-9]\s*[oa.°ª)]/.test(m)) idx = parseInt(m, 10) - 1;
+    else if (/\b(primeira|primeiro|1a|1o|1ª|1º)\b/.test(m)) idx = 0;
+    else if (/\b(segunda|segundo|2a|2o|2ª|2º)\b/.test(m) && !/feira/.test(m)) idx = 1;
+    else if (/\b(terceira|terceiro|3a|3o|3ª|3º)\b/.test(m)) idx = 2;
+    else if (/\b(quarta|quarto|4a|4o|4ª|4º)\b/.test(m) && !/feira/.test(m)) idx = 3;
+    else if (/\b(ultima|ultimo|ultima\s+consulta)\b/.test(m)) idx = futuros.length - 1;
+    if (idx !== null && idx >= 0 && idx < futuros.length) {
+      return { matched: futuros[idx], ambiguous: false, candidates: [futuros[idx]] };
+    }
+  }
 
   let candidatos = [...futuros];
 
