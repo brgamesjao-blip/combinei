@@ -32,6 +32,10 @@ export async function processarMensagem(
   if (dados.periodo) ctx.dadosColetados.periodo = dados.periodo;
   if (dados.pacienteNome) ctx.dadosColetados.pacienteNome = dados.pacienteNome;
 
+  // Mudança de ideia mid-flow: "muda o profissional", "outro horário", "outro dia"
+  // sem trazer um novo valor → limpar o campo pra não confirmar com dado obsoleto.
+  aplicarCorrecoes(msg, dados, ctx);
+
   if (dados.intencao === 'falar_humano') ctx.etapa = 'handoff_humano';
   if (dados.intencao === 'cancelar') ctx.etapa = 'cancelamento_solicitado';
 
@@ -110,6 +114,39 @@ export async function processarMensagem(
   }
 
   return { resposta, contexto: ctx };
+}
+
+/**
+ * Detecta sinais de correção/mudança na mensagem do paciente sem novo valor.
+ * Ex: "muda o profissional" sem dizer qual → deletar dadosColetados.profissional
+ * pra forçar o bot a perguntar de novo em vez de confirmar com o velho.
+ */
+function aplicarCorrecoes(
+  msg: string,
+  dados: DadosExtraidos,
+  ctx: ContextoConversa
+): void {
+  const m = msg.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const sinalMudanca = /\b(muda|mudar|mudei|trocar|troca|trocou|outro|outra|esquece|esqueci|prefiro|prefere|na verdade|melhor|nao|pera|espera|opa|ai nao|opa nao)\b/.test(m);
+  if (!sinalMudanca) return;
+
+  // "muda profissional/médico/doutor" sem trazer novo nome
+  if (/\b(profissional|medico|medica|doutor|doutora|dr|dra)\b/.test(m) && !dados.profissional) {
+    delete (ctx.dadosColetados as Record<string, unknown>).profissional;
+  }
+  // "muda dia/data" sem trazer nova
+  if (/\b(dia|data)\b/.test(m) && !dados.data) {
+    delete (ctx.dadosColetados as Record<string, unknown>).data;
+  }
+  // "muda hora/horario" sem trazer novo
+  if (/\b(hora|horario|horas)\b/.test(m) && !dados.horario) {
+    delete (ctx.dadosColetados as Record<string, unknown>).horario;
+    delete (ctx.dadosColetados as Record<string, unknown>).periodo;
+  }
+  // "muda servico" sem trazer novo
+  if (/\b(servico|exame|consulta|procedimento)\b/.test(m) && !dados.servico) {
+    delete (ctx.dadosColetados as Record<string, unknown>).servico;
+  }
 }
 
 const VALID_INTENCOES: ReadonlyArray<DadosExtraidos['intencao']> = [
