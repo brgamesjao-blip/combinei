@@ -82,12 +82,32 @@ export async function marcarHandoff(clinicaId: string, telefone: string) {
   });
 }
 
-/** Cleanup stale conversations older than N hours */
-export async function limparConversasAntigas(hoursOld: number): Promise<number> {
+export interface ConversaParaLimpar {
+  id: string;
+  clinica_id: string;
+  paciente_telefone: string;
+}
+
+/**
+ * Limpa conversas com updated_at < cutoff. Se onBeforeDelete for fornecido,
+ * executa pra cada conversa antes de deletar (útil pra avisar o paciente).
+ * Falhas no callback NÃO bloqueiam o delete.
+ */
+export async function limparConversasAntigas(
+  hoursOld: number,
+  onBeforeDelete?: (conv: ConversaParaLimpar) => Promise<void>
+): Promise<number> {
   const cutoff = new Date(Date.now() - hoursOld * 3600000).toISOString();
-  const { data } = await supabase.from('conversas').select('id')
+  const { data } = await supabase.from('conversas')
+    .select('id, clinica_id, paciente_telefone')
     .lt('updated_at', cutoff).not('etapa', 'eq', 'handoff_humano');
   if (!data || data.length === 0) return 0;
+
+  if (onBeforeDelete) {
+    for (const c of data as ConversaParaLimpar[]) {
+      try { await onBeforeDelete(c); } catch { /* não bloqueia delete */ }
+    }
+  }
 
   const ids = data.map(c => c.id);
   await supabase.from('conversas').delete().in('id', ids);

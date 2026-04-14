@@ -62,9 +62,34 @@ router.get('/api/notifications/process', requireApiKey, async (_req: Request, re
 router.get('/api/cleanup/conversas', requireApiKey, async (_req: Request, res: Response) => {
   try {
     const hours = env.CONVERSATION_TIMEOUT_HOURS;
-    const cleaned = await limparConversasAntigas(hours);
-    logger.info('Conversas limpas', { cleaned, hoursOld: hours });
-    res.json({ cleaned, hoursThreshold: hours });
+
+    // Cache de info da clínica pra não fazer N+1 query no callback
+    const clinicaInfo = new Map<string, { nome: string; botNome: string; instance: string } | null>();
+    let avisados = 0;
+
+    const cleaned = await limparConversasAntigas(hours, async (conv) => {
+      let info = clinicaInfo.get(conv.clinica_id);
+      if (info === undefined) {
+        const { data: cl } = await supabase.from('clinicas')
+          .select('nome, bot_nome, phone_number_id').eq('id', conv.clinica_id).single();
+        info = cl?.phone_number_id
+          ? { nome: cl.nome || 'Clínica', botNome: cl.bot_nome || 'Bia', instance: cl.phone_number_id }
+          : null;
+        clinicaInfo.set(conv.clinica_id, info);
+      }
+      if (!info || !conv.paciente_telefone) return;
+
+      const msg = `Oi! Aqui é a ${info.botNome} da ${info.nome}. Sua conversa anterior expirou — se precisar de algo, é só me chamar de novo que começamos do zero! 😊`;
+      try {
+        await enviarMensagem(conv.paciente_telefone, msg, info.instance);
+        avisados++;
+      } catch (e) {
+        logger.warn('Falha ao avisar paciente sobre cleanup', { error: (e as Error).message });
+      }
+    });
+
+    logger.info('Conversas limpas', { cleaned, avisados, hoursOld: hours });
+    res.json({ cleaned, avisados, hoursThreshold: hours });
   } catch (e) {
     logger.error('Cleanup error', { error: (e as Error).message });
     res.status(500).json({ error: 'Erro' });
