@@ -344,7 +344,7 @@ export function buildExtractionPrompt(): string {
 
 '═══ MENSAGENS COM CONTEXTO ═══\n' +
 'A mensagem pode vir com CONTEXTO DA CONVERSA anterior. Use o contexto para interpretar melhor:\n' +
-'- "sim", "pode ser", "isso", "esse", "ok", "bora" → SEMPRE intencao: "outro" (o servidor preserva a intenção anterior)\n' +
+'- "sim", "pode ser", "isso", "esse", "ok", "bora", "blz", "beleza", "tranquilo", "massa", "k", "kk", "vlw", "valeu", "perfeito", "show" → SEMPRE intencao: "outro" (o servidor preserva a intenção anterior)\n' +
 '- Se o bot perguntou qual profissional e o paciente respondeu um nome → extraia como profissional\n' +
 '- Se o bot perguntou qual dia/horário e o paciente respondeu → extraia como data/horario\n' +
 '- Se o bot perguntou o nome e o paciente respondeu → extraia como pacienteNome\n' +
@@ -359,5 +359,9 @@ export function buildExtractionPrompt(): string {
 '"oi" → {"intencao":"saudacao","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":null}\n' +
 '"sim" → {"intencao":"outro","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":null}\n' +
 '"pode ser" → {"intencao":"outro","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":null}\n' +
-'"ok" → {"intencao":"outro","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":null}';
+'"ok" → {"intencao":"outro","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":null}\n' +
+'"blz" → {"intencao":"outro","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":null}\n' +
+'"vlw" → {"intencao":"agradecimento","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":null}\n' +
+'"k" → {"intencao":"outro","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":null}\n' +
+'"tranquilo" → {"intencao":"outro","profissional":null,"servico":null,"data":null,"horario":null,"periodo":null,"pacienteNome":null}';
 }
