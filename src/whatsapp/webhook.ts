@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { enviarMensagem } from './client';
 import { processarMensagem, criarContextoInicial } from '../ai/engine';
-import { buscarConversa, salvarConversa, limparConversa, criarAgendamento, cancelarAgendamentoPaciente, marcarHandoff, supabase, getOcupadosPorProfissional } from '../db/client';
+import { buscarConversa, salvarConversa, limparConversa, criarAgendamento, cancelarAgendamentoPaciente, listarAgendamentosFuturos, cancelarAgendamentoPorId, marcarHandoff, supabase, getOcupadosPorProfissional, AgendamentoFuturo } from '../db/client';
 import { Clinica, HorarioDisponivel } from '../types';
 import { validateWebhook } from '../middleware/validateWebhook';
 import { webhookLimiter } from '../middleware/rateLimit';
@@ -501,12 +501,61 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
   // CANCELAMENTO: only execute AFTER AI confirms
   if (resultado.contexto.dadosColetados.intencao === 'cancelar' &&
       (resultado.resposta.toLowerCase().includes('cancelad') || resultado.resposta.toLowerCase().includes('desmarcad'))) {
-    const cancelled = await cancelarAgendamentoPaciente(clinica.id, phone);
-    if (cancelled) {
-      logger.info('Agendamento cancelado via bot', { phone, clinica: clinica.nome, reqId, stage: 'cancelado' });
+    const futuros = await listarAgendamentosFuturos(clinica.id, phone);
+
+    if (futuros.length === 0) {
+      // Nada a cancelar — bot já disse algo. Segue.
+      logger.info('Cancelamento solicitado sem agendamentos futuros', { phone, reqId, stage: 'cancel_vazio' });
+      await enviarMensagem(phone, resultado.resposta, instanceName);
+      await limparConversa(clinica.id, phone);
+      return;
     }
-    await enviarMensagem(phone, resultado.resposta, instanceName);
-    await limparConversa(clinica.id, phone);
+
+    if (futuros.length === 1) {
+      // Caso simples — cancela direto
+      await cancelarAgendamentoPorId(futuros[0].id);
+      logger.info('Agendamento cancelado via bot', { phone, clinica: clinica.nome, agendamentoId: futuros[0].id, reqId, stage: 'cancelado' });
+      await enviarMensagem(phone, resultado.resposta, instanceName);
+      await limparConversa(clinica.id, phone);
+      return;
+    }
+
+    // >1 agendamentos: tenta identificar qual via dados extraídos
+    const d = resultado.contexto.dadosColetados;
+    const match = matchAgendamento(
+      { data: d.data, horario: d.horario, profissional: d.profissional },
+      futuros
+    );
+
+    if (match.matched) {
+      await cancelarAgendamentoPorId(match.matched.id);
+      logger.info('Agendamento específico cancelado', { phone, agendamentoId: match.matched.id, dt: match.matched.data_hora, reqId, stage: 'cancelado_especifico' });
+      await enviarMensagem(phone, resultado.resposta, instanceName);
+      await limparConversa(clinica.id, phone);
+      return;
+    }
+
+    // Ambíguo: lista as opções e pede escolha. Sobrescreve a resposta do AI
+    // (que pode ter dito "cancelado!") + mantém intencao=cancelar pra próxima
+    // msg do paciente ser interpretada como escolha.
+    const lista = futuros.map((a, i) => {
+      const dt = new Date(a.data_hora);
+      const dataStr = dt.toLocaleDateString('pt-BR');
+      const horaStr = dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+      return `${i + 1}. ${dataStr} às ${horaStr} com ${a.profissional_nome}`;
+    }).join('\n');
+    const msgLista = `Você tem ${futuros.length} consultas marcadas:\n\n${lista}\n\nQual você quer cancelar? Pode me dizer o dia, horário ou profissional.`;
+
+    logger.info('Cancelamento ambíguo, pedindo escolha', { phone, count: futuros.length, reqId, stage: 'cancel_ambiguo' });
+    await enviarMensagem(phone, msgLista, instanceName);
+    await salvarConversa(clinica.id, phone, {
+      etapa: 'cancelamento_solicitado',
+      dadosColetados: { ...resultado.contexto.dadosColetados, intencao: 'cancelar' } as Record<string, unknown>,
+      historicoMensagens: [
+        ...resultado.contexto.historicoMensagens,
+        { role: 'assistant', content: msgLista },
+      ].slice(-30),
+    });
     return;
   }
 
@@ -663,6 +712,50 @@ function filtrarOcupadosMultiProf(horarios: HorarioDisponivel[], ocupados: any[]
       return (slotCount[key] || 0) < totalProfs;
     }),
   })).filter(dia => dia.horarios.length > 0);
+}
+
+/**
+ * Tenta identificar qual agendamento o paciente quer cancelar com base nos
+ * dados extraídos (data, horário, profissional). Retorna ambiguous=true se
+ * múltiplos batem ou nenhum critério foi informado.
+ */
+function matchAgendamento(
+  d: { data?: string; horario?: string; profissional?: string },
+  futuros: AgendamentoFuturo[]
+): { matched: AgendamentoFuturo | null; ambiguous: boolean; candidates: AgendamentoFuturo[] } {
+  if (futuros.length === 0) return { matched: null, ambiguous: false, candidates: [] };
+
+  let candidatos = [...futuros];
+
+  // Filtro por data
+  if (d.data) {
+    const dtIso = resolverDataHora(d.data, undefined);
+    if (dtIso) {
+      const dataAlvo = dtIso.substring(0, 10);
+      candidatos = candidatos.filter(a => a.data_hora.substring(0, 10) === dataAlvo);
+    }
+  }
+
+  // Filtro por hora (se restou >1 e tem horário)
+  if (d.horario && candidatos.length > 1) {
+    const horaAlvo = String(d.horario).substring(0, 5);
+    candidatos = candidatos.filter(a => a.data_hora.substring(11, 16) === horaAlvo);
+  }
+
+  // Filtro por profissional (se restou >1 e tem nome)
+  if (d.profissional && candidatos.length > 1) {
+    const q = String(d.profissional).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/^(doutora?|dra?\.?|doutor|dr\.?)\s*/i, '').trim();
+    if (q) {
+      candidatos = candidatos.filter(a => {
+        const np = a.profissional_nome.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/^(doutora?|dra?\.?|doutor|dr\.?)\s*/i, '').trim();
+        return np.includes(q) || q.includes(np);
+      });
+    }
+  }
+
+  if (candidatos.length === 1) return { matched: candidatos[0], ambiguous: false, candidates: candidatos };
+  if (candidatos.length === 0) return { matched: null, ambiguous: false, candidates: [] };
+  return { matched: null, ambiguous: true, candidates: candidatos };
 }
 
 /**

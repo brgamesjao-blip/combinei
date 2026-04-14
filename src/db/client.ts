@@ -53,17 +53,44 @@ export async function criarAgendamento(a: {
   }
 }
 
-/** Cancel the most recent confirmed appointment for this patient */
-export async function cancelarAgendamentoPaciente(clinicaId: string, telefone: string): Promise<boolean> {
+export interface AgendamentoFuturo {
+  id: string;
+  data_hora: string;
+  duracao_minutos: number;
+  profissional_nome: string;
+}
+
+/** Lista agendamentos futuros confirmados deste paciente, ordenados por data. */
+export async function listarAgendamentosFuturos(
+  clinicaId: string, telefone: string
+): Promise<AgendamentoFuturo[]> {
   const { data } = await supabase.from('agendamentos')
-    .select('id').eq('clinica_id', clinicaId).eq('paciente_telefone', telefone)
+    .select('id, data_hora, duracao_minutos, profissionais(nome)')
+    .eq('clinica_id', clinicaId).eq('paciente_telefone', telefone)
     .eq('status', 'confirmado').gte('data_hora', new Date().toISOString())
-    .order('data_hora', { ascending: true }).limit(1);
+    .order('data_hora', { ascending: true });
+  return (data || []).map((a: { id: string; data_hora: string; duracao_minutos: number; profissionais: { nome: string } | null }) => ({
+    id: a.id,
+    data_hora: a.data_hora,
+    duracao_minutos: a.duracao_minutos,
+    profissional_nome: a.profissionais?.nome || '?',
+  }));
+}
 
-  if (!data || data.length === 0) return false;
+/** Cancela agendamento específico por ID. */
+export async function cancelarAgendamentoPorId(id: string): Promise<void> {
+  await supabase.from('agendamentos').update({ status: 'cancelado' }).eq('id', id);
+}
 
-  await supabase.from('agendamentos')
-    .update({ status: 'cancelado' }).eq('id', data[0].id);
+/**
+ * Cancela o próximo agendamento futuro do paciente. Útil quando há só 1.
+ * Quando há múltiplos, o caller deve usar listarAgendamentosFuturos +
+ * cancelarAgendamentoPorId pra evitar cancelar o errado.
+ */
+export async function cancelarAgendamentoPaciente(clinicaId: string, telefone: string): Promise<boolean> {
+  const futuros = await listarAgendamentosFuturos(clinicaId, telefone);
+  if (futuros.length === 0) return false;
+  await cancelarAgendamentoPorId(futuros[0].id);
   return true;
 }
 
