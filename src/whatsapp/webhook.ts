@@ -555,21 +555,26 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
       logger.info('AGENDAMENTO RESOLVE', { dt: String(dt || 'NULL'), profFound: !!prof, profNome: String(prof?.nome || 'NONE'), reqId });
 
       if (dt && prof) {
-        // Defense in depth: validate appointment time isn't in lunch break
-        const lunchStart = clinicaRow.almoco_inicio;
-        const lunchEnd = clinicaRow.almoco_fim;
-        if (lunchStart && lunchEnd && d.horario) {
-          const [apptH, apptM] = String(d.horario).split(':').map(Number);
-          const [lsH, lsM] = String(lunchStart).split(':').map(Number);
-          const [leH, leM] = String(lunchEnd).split(':').map(Number);
-          const apptMins = apptH * 60 + apptM;
-          const lsMins = lsH * 60 + lsM;
-          const leMins = leH * 60 + leM;
-          if (apptMins >= lsMins && apptMins < leMins) {
-            logger.warn('Tentativa de agendamento no horário de almoço', { phone, horario: String(d.horario), reqId });
-            await enviarMensagem(phone, 'Ops, esse horário cai no nosso intervalo de almoço! Pode escolher outro?', instanceName);
-            return;
-          }
+        // Validação final: dia de atendimento, horário func, almoço, passado.
+        // Defesa contra AI confirmar agendamento inválido (ex: paciente insiste
+        // em domingo mesmo o bot tendo dito que clínica fecha).
+        const validacao = validarSlot(dt, clinica, clinicaRow);
+        if (!validacao.valido) {
+          logger.warn('Slot inválido detectado antes de criar', { motivo: validacao.motivo, dt, phone, reqId, stage: 'slot_invalido' });
+          await enviarMensagem(phone, `Ops, esse horário não vai dar — ${validacao.motivo}. Pode escolher outro?`, instanceName);
+          // Reset etapa e limpa data/horario pra paciente continuar fluxo
+          await salvarConversa(clinica.id, phone, {
+            etapa: 'inicio',
+            dadosColetados: (() => {
+              const novo = { ...resultado.contexto.dadosColetados };
+              delete (novo as Record<string, unknown>).data;
+              delete (novo as Record<string, unknown>).horario;
+              delete (novo as Record<string, unknown>).periodo;
+              return novo as Record<string, unknown>;
+            })(),
+            historicoMensagens: resultado.contexto.historicoMensagens.slice(-30),
+          });
+          return;
         }
 
         try {
@@ -658,6 +663,62 @@ function filtrarOcupadosMultiProf(horarios: HorarioDisponivel[], ocupados: any[]
       return (slotCount[key] || 0) < totalProfs;
     }),
   })).filter(dia => dia.horarios.length > 0);
+}
+
+/**
+ * Validação final antes de criar agendamento. Detecta slots inválidos que o AI
+ * pode ter aceitado (paciente insistiu em domingo, fora horário, almoço, passado).
+ * Mensagem retornada é amigável e termina sem ponto pra interpolação.
+ */
+function validarSlot(
+  dtIso: string,
+  clinica: Clinica,
+  clinicaRow: { almoco_inicio?: string; almoco_fim?: string; horario_abertura?: string; horario_fechamento?: string }
+): { valido: boolean; motivo?: string } {
+  const date = new Date(dtIso);
+  if (isNaN(date.getTime())) return { valido: false, motivo: 'data/horário inválidos' };
+
+  // No passado (5min de tolerância)
+  if (date.getTime() < Date.now() - 5 * 60000) {
+    return { valido: false, motivo: 'esse horário já passou' };
+  }
+
+  // Dia de atendimento — ATENÇÃO: getDay() usa timezone local do servidor.
+  // O dtIso vem com offset -03:00, então new Date(...) ainda dá UTC. Pra extrair
+  // o dia da semana no fuso de Brasília, derivar do próprio ISO.
+  const isoMatch = dtIso.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (!isoMatch) return { valido: false, motivo: 'formato de data inválido' };
+  const [, yy, mm, dd, hh, mn] = isoMatch;
+  const localDate = new Date(+yy, +mm - 1, +dd);
+  const dow = localDate.getDay();
+
+  const diasAtend = clinica.diasAtendimento || [1, 2, 3, 4, 5];
+  if (!diasAtend.includes(dow)) {
+    const nomes = ['domingo', 'segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado'];
+    return { valido: false, motivo: `não atendemos ${nomes[dow]}` };
+  }
+
+  // Horário de funcionamento
+  const horaTotal = +hh * 60 + +mn;
+  const [abH, abM] = (clinicaRow.horario_abertura || '08:00').split(':').map(Number);
+  const [feH, feM] = (clinicaRow.horario_fechamento || '18:00').split(':').map(Number);
+  const ab = abH * 60 + abM;
+  const fe = feH * 60 + feM;
+  if (horaTotal < ab) return { valido: false, motivo: `só abrimos às ${clinicaRow.horario_abertura || '08:00'}` };
+  if (horaTotal >= fe) return { valido: false, motivo: `fechamos às ${clinicaRow.horario_fechamento || '18:00'}` };
+
+  // Almoço
+  if (clinicaRow.almoco_inicio && clinicaRow.almoco_fim) {
+    const [alH, alM] = clinicaRow.almoco_inicio.split(':').map(Number);
+    const [afH, afM] = clinicaRow.almoco_fim.split(':').map(Number);
+    const al = alH * 60 + alM;
+    const af = afH * 60 + afM;
+    if (horaTotal >= al && horaTotal < af) {
+      return { valido: false, motivo: `é nosso intervalo de almoço (${clinicaRow.almoco_inicio} às ${clinicaRow.almoco_fim})` };
+    }
+  }
+
+  return { valido: true };
 }
 
 function resolverDataHora(data?: string, horario?: string): string | null {
