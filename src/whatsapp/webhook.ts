@@ -382,6 +382,34 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
     ctx.dadosColetados = salva.dadosColetados;
     ctx.historicoMensagens = salva.historicoMensagens;
 
+    // Resposta a lembrete 24h (última msg do bot perguntou "Vai poder comparecer?")
+    const respLembrete = detectarRespostaLembrete(salva.historicoMensagens, texto);
+    if (respLembrete === 'sim') {
+      logger.info('Lembrete 24h confirmado pelo paciente', { phone, reqId, stage: 'lembrete_sim' });
+      await enviarMensagem(phone, 'Show, te esperamos! Qualquer coisa é só me chamar 😊', instanceName);
+      await limparConversa(clinica.id, phone);
+      return;
+    }
+    if (respLembrete === 'nao') {
+      logger.info('Lembrete 24h cancelado pelo paciente', { phone, reqId, stage: 'lembrete_nao' });
+      const cancelled = await cancelarAgendamentoPaciente(clinica.id, phone);
+      const msg = cancelled
+        ? 'Sem problema, cancelei sua consulta! Quer remarcar pra outro dia?'
+        : 'Hmm, não encontrei a consulta pra cancelar. Pode me dar mais detalhes?';
+      await enviarMensagem(phone, msg, instanceName);
+      // Mantém conversa aberta com intencao=remarcar pra próxima msg ser interpretada bem
+      await salvarConversa(clinica.id, phone, {
+        etapa: 'cancelamento_solicitado',
+        dadosColetados: cancelled ? { intencao: 'remarcar' as const } : {},
+        historicoMensagens: [
+          ...salva.historicoMensagens,
+          { role: 'user', content: texto },
+          { role: 'assistant', content: msg },
+        ].slice(-30),
+      });
+      return;
+    }
+
     // Detect stale conversation (gap > 2 hours) — note goes in system prompt, not in message history
     if (salva.updatedAt) {
       const gap = Date.now() - new Date(salva.updatedAt).getTime();
@@ -726,6 +754,29 @@ function filtrarOcupadosMultiProf(horarios: HorarioDisponivel[], ocupados: any[]
       return (slotCount[key] || 0) < totalProfs;
     }),
   })).filter(dia => dia.horarios.length > 0);
+}
+
+/**
+ * Detecta se a msg do paciente é resposta SIM/NÃO ao lembrete 24h.
+ * Olha a última msg do bot — se contém "Vai poder comparecer", está esperando
+ * confirmação. Mensagens curtas tipo "sim"/"não" são interpretadas como tal.
+ * Retorna null se não é resposta a lembrete (segue fluxo normal).
+ */
+function detectarRespostaLembrete(
+  historico: Array<{ role: string; content: string }>,
+  msg: string
+): 'sim' | 'nao' | null {
+  const ultimaAssistant = [...historico].reverse().find(m => m.role === 'assistant');
+  if (!ultimaAssistant) return null;
+  const conteudo = ultimaAssistant.content.toLowerCase();
+  if (!conteudo.includes('vai poder comparecer') && !conteudo.includes('lembrete')) return null;
+
+  const m = msg.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+  if (m.length > 80) return null; // resposta longa = não é só sim/não
+
+  if (/^(sim|s|confirmo|confirmado|vou|certo|tudo bem|ok|positivo|com certeza|claro|pode contar|perfeito)\b/.test(m)) return 'sim';
+  if (/^(nao|n|nao posso|nao vou|infelizmente|cancela|cancelar|desmarca|desmarcar|nao da|negativo|impossivel)\b/.test(m)) return 'nao';
+  return null;
 }
 
 /**
