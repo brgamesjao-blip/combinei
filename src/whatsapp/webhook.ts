@@ -112,9 +112,18 @@ const MAX_BATCH_SIZE = 10; // Protect against spam / rapid-fire abuse
 // mesmo paciente NUNCA rodem em paralelo (evita salvarConversa concorrente
 // e processamento fora de ordem quando uma msg chega durante o processing).
 const batchProcessing = new Map<string, Promise<void>>();
+const BATCH_HARD_TIMEOUT_MS = 30000; // se processamento não termina em 30s, libera
 function scheduleBatch(batchKey: string, fn: () => Promise<void>): void {
   const prev = batchProcessing.get(batchKey) || Promise.resolve();
-  const next = prev.catch(() => {}).then(fn);
+  // Promise.race garante que o chain não fica travado se processarLote hangar
+  // (DB deadlock, AI timeout não propagado, etc). Loga e libera próximo.
+  const guarded = () => Promise.race([
+    fn(),
+    new Promise<void>((_, rej) => setTimeout(() => rej(new Error('Batch hard timeout 30s')), BATCH_HARD_TIMEOUT_MS)),
+  ]).catch(e => {
+    logger.error('Batch travou ou falhou após timeout', { error: (e as Error).message, batchKey });
+  });
+  const next = prev.catch(() => {}).then(guarded);
   batchProcessing.set(batchKey, next);
   next.finally(() => {
     if (batchProcessing.get(batchKey) === next) batchProcessing.delete(batchKey);
