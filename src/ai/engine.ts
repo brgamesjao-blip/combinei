@@ -151,8 +151,8 @@ function aplicarCorrecoes(
   if (/\b(dia|data)\b/.test(m) && !dados.data) {
     delete (ctx.dadosColetados as Record<string, unknown>).data;
   }
-  // "muda hora/horario" sem trazer novo
-  if (/\b(hora|horario|horas)\b/.test(m) && !dados.horario) {
+  // "muda hora/horario/horarios" sem trazer novo
+  if (/\b(hora|horario|horarios|horas)\b/.test(m) && !dados.horario) {
     delete (ctx.dadosColetados as Record<string, unknown>).horario;
     delete (ctx.dadosColetados as Record<string, unknown>).periodo;
   }
