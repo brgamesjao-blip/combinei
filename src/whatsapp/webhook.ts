@@ -392,7 +392,7 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
     ctx.historicoMensagens = salva.historicoMensagens;
 
     // Resposta a lembrete 24h (última msg do bot perguntou "Vai poder comparecer?")
-    const respLembrete = detectarRespostaLembrete(salva.historicoMensagens, texto);
+    const respLembrete = detectarRespostaLembrete(salva.historicoMensagens, texto, salva.updatedAt);
     if (respLembrete === 'sim') {
       logger.info('Lembrete 24h confirmado pelo paciente', { phone, reqId, stage: 'lembrete_sim' });
       await enviarMensagem(phone, 'Show, te esperamos! Qualquer coisa é só me chamar 😊', instanceName);
@@ -770,23 +770,36 @@ function filtrarOcupadosMultiProf(horarios: HorarioDisponivel[], ocupados: any[]
 /**
  * Detecta se a msg do paciente é resposta SIM/NÃO ao lembrete 24h.
  * Olha a última msg do bot — se contém "Vai poder comparecer", está esperando
- * confirmação. Mensagens curtas tipo "sim"/"não" são interpretadas como tal.
+ * confirmação. Só dispara se:
+ *  - última msg do bot foi recente (< 30min) — evita confundir com lembrete
+ *    velho num histórico onde houve conversa nova depois
+ *  - msg do paciente é literalmente uma confirmação curta (regex estrita)
  * Retorna null se não é resposta a lembrete (segue fluxo normal).
  */
 function detectarRespostaLembrete(
   historico: Array<{ role: string; content: string }>,
-  msg: string
+  msg: string,
+  conversaUpdatedAt: string | null
 ): 'sim' | 'nao' | null {
   const ultimaAssistant = [...historico].reverse().find(m => m.role === 'assistant');
   if (!ultimaAssistant) return null;
   const conteudo = ultimaAssistant.content.toLowerCase();
   if (!conteudo.includes('vai poder comparecer') && !conteudo.includes('lembrete')) return null;
 
-  const m = msg.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
-  if (m.length > 80) return null; // resposta longa = não é só sim/não
+  // Recência: se conversa foi atualizada há mais de 30min, o "vai poder
+  // comparecer" pode ser de um lembrete velho — não interpretar.
+  if (conversaUpdatedAt) {
+    const idadeMs = Date.now() - new Date(conversaUpdatedAt).getTime();
+    if (idadeMs > 30 * 60000) return null;
+  }
 
-  if (/^(sim|s|confirmo|confirmado|vou|certo|tudo bem|ok|positivo|com certeza|claro|pode contar|perfeito)\b/.test(m)) return 'sim';
-  if (/^(nao|n|nao posso|nao vou|infelizmente|cancela|cancelar|desmarca|desmarcar|nao da|negativo|impossivel)\b/.test(m)) return 'nao';
+  const m = msg.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+  // Resposta exata curta — evita "naoooo eu ja respondi" virar cancelamento.
+  // Permite pontuação opcional no fim.
+  const simExato = /^(sim|s|confirmo|confirmado|vou|vou sim|certo|tudo bem|ok|positivo|com certeza|claro|pode contar|perfeito)[\s.!]*$/;
+  const naoExato = /^(nao|n|nao posso|nao vou|infelizmente nao|nao da|nao consigo|negativo|impossivel|cancela|cancelar|desmarca|desmarcar)[\s.!]*$/;
+  if (simExato.test(m)) return 'sim';
+  if (naoExato.test(m)) return 'nao';
   return null;
 }
 
