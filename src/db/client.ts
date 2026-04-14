@@ -125,9 +125,14 @@ export async function limparConversasAntigas(
   onBeforeDelete?: (conv: ConversaParaLimpar) => Promise<void>
 ): Promise<number> {
   const cutoff = new Date(Date.now() - hoursOld * 3600000).toISOString();
+  // Preserva conversas em estados ativos onde paciente está esperando próximo
+  // turno: handoff (humano respondendo), cancelamento_solicitado (escolha de
+  // qual cancelar), aguardando_confirmacao_24h (resposta a lembrete pendente).
+  const etapasPreservadas = ['handoff_humano', 'cancelamento_solicitado', 'aguardando_confirmacao_24h'];
   const { data } = await supabase.from('conversas')
     .select('id, clinica_id, paciente_telefone')
-    .lt('updated_at', cutoff).not('etapa', 'eq', 'handoff_humano');
+    .lt('updated_at', cutoff)
+    .not('etapa', 'in', `(${etapasPreservadas.map(e => `"${e}"`).join(',')})`);
   if (!data || data.length === 0) return 0;
 
   if (onBeforeDelete) {
