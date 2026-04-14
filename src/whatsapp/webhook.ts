@@ -656,10 +656,11 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
       logger.info('AGENDAMENTO RESOLVE', { dt: String(dt || 'NULL'), profFound: !!prof, profNome: String(prof?.nome || 'NONE'), reqId });
 
       if (dt && prof) {
-        // Validação final: dia de atendimento, horário func, almoço, passado.
+        // Validação final: dia de atendimento, horário func, almoço, passado,
+        // e duração não ultrapassa fechamento/almoço.
         // Defesa contra AI confirmar agendamento inválido (ex: paciente insiste
-        // em domingo mesmo o bot tendo dito que clínica fecha).
-        const validacao = validarSlot(dt, clinica, clinicaRow);
+        // em domingo, ou marca 17:30 com 60min e ultrapassa 18:00).
+        const validacao = validarSlot(dt, clinica, clinicaRow, duracao);
         if (!validacao.valido) {
           logger.warn('Slot inválido detectado antes de criar', { motivo: validacao.motivo, dt, phone, reqId, stage: 'slot_invalido' });
           await enviarMensagem(phone, `Ops, esse horário não vai dar — ${validacao.motivo}. Pode escolher outro?`, instanceName);
@@ -858,7 +859,8 @@ function matchAgendamento(
 function validarSlot(
   dtIso: string,
   clinica: Clinica,
-  clinicaRow: { almoco_inicio?: string; almoco_fim?: string; horario_abertura?: string; horario_fechamento?: string }
+  clinicaRow: { almoco_inicio?: string; almoco_fim?: string; horario_abertura?: string; horario_fechamento?: string },
+  duracaoMinutos: number = 30
 ): { valido: boolean; motivo?: string } {
   const date = new Date(dtIso);
   if (isNaN(date.getTime())) return { valido: false, motivo: 'data/horário inválidos' };
@@ -868,9 +870,9 @@ function validarSlot(
     return { valido: false, motivo: 'esse horário já passou' };
   }
 
-  // Dia de atendimento — ATENÇÃO: getDay() usa timezone local do servidor.
-  // O dtIso vem com offset -03:00, então new Date(...) ainda dá UTC. Pra extrair
-  // o dia da semana no fuso de Brasília, derivar do próprio ISO.
+  // Dia de atendimento — derivar do próprio ISO pra evitar dependência do TZ
+  // do servidor (Railway = UTC, mas getDay() retorna o mesmo dow pra os
+  // mesmos year/month/day em qualquer TZ).
   const isoMatch = dtIso.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
   if (!isoMatch) return { valido: false, motivo: 'formato de data inválido' };
   const [, yy, mm, dd, hh, mn] = isoMatch;
@@ -883,23 +885,31 @@ function validarSlot(
     return { valido: false, motivo: `não atendemos ${nomes[dow]}` };
   }
 
-  // Horário de funcionamento
-  const horaTotal = +hh * 60 + +mn;
+  // Horário de funcionamento — start E término (start + duracao)
+  const horaInicio = +hh * 60 + +mn;
+  const horaFim = horaInicio + duracaoMinutos;
   const [abH, abM] = (clinicaRow.horario_abertura || '08:00').split(':').map(Number);
   const [feH, feM] = (clinicaRow.horario_fechamento || '18:00').split(':').map(Number);
   const ab = abH * 60 + abM;
   const fe = feH * 60 + feM;
-  if (horaTotal < ab) return { valido: false, motivo: `só abrimos às ${clinicaRow.horario_abertura || '08:00'}` };
-  if (horaTotal >= fe) return { valido: false, motivo: `fechamos às ${clinicaRow.horario_fechamento || '18:00'}` };
+  if (horaInicio < ab) return { valido: false, motivo: `só abrimos às ${clinicaRow.horario_abertura || '08:00'}` };
+  if (horaInicio >= fe) return { valido: false, motivo: `fechamos às ${clinicaRow.horario_fechamento || '18:00'}` };
+  if (horaFim > fe) {
+    return { valido: false, motivo: `a consulta dura ${duracaoMinutos} min e ultrapassaria nosso fechamento das ${clinicaRow.horario_fechamento || '18:00'}` };
+  }
 
-  // Almoço
+  // Almoço — start dentro OU término invade (almoço pego de raspão)
   if (clinicaRow.almoco_inicio && clinicaRow.almoco_fim) {
     const [alH, alM] = clinicaRow.almoco_inicio.split(':').map(Number);
     const [afH, afM] = clinicaRow.almoco_fim.split(':').map(Number);
     const al = alH * 60 + alM;
     const af = afH * 60 + afM;
-    if (horaTotal >= al && horaTotal < af) {
+    if (horaInicio >= al && horaInicio < af) {
       return { valido: false, motivo: `é nosso intervalo de almoço (${clinicaRow.almoco_inicio} às ${clinicaRow.almoco_fim})` };
+    }
+    // Slot começa antes do almoço mas termina dentro
+    if (horaInicio < al && horaFim > al) {
+      return { valido: false, motivo: `a consulta dura ${duracaoMinutos} min e invadiria nosso almoço (${clinicaRow.almoco_inicio})` };
     }
   }
 
