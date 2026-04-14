@@ -82,6 +82,20 @@ const EMERGENCY_RESPONSE = 'Parece que é uma situação de emergência! 🚨\n\
 
 // Idempotency: deduplicate messages (5 min TTL)
 const processedMessages = new Map<string, number>();
+const MAX_PROCESSED = 50000;
+function addProcessed(id: string): void {
+  processedMessages.set(id, Date.now());
+  // Hard cap pra evitar memory leak em picos. Map é insertion-ordered, então
+  // deletar primeiras N chaves remove as mais antigas.
+  if (processedMessages.size > MAX_PROCESSED) {
+    let removed = 0;
+    for (const k of processedMessages.keys()) {
+      processedMessages.delete(k);
+      if (++removed >= 10000) break;
+    }
+    logger.warn('processedMessages cap atingido', { removed, remaining: processedMessages.size });
+  }
+}
 setInterval(() => { const cut = Date.now() - 300000; for (const [k, v] of processedMessages) { if (v < cut) processedMessages.delete(k); } }, 60000);
 
 // ── Message batching: accumulate rapid-fire messages before processing ──
@@ -129,7 +143,7 @@ router.post('/webhook', webhookLimiter, validateWebhook, async (req: Request, re
     // Idempotency
     const messageId = data.key.id;
     if (messageId && processedMessages.has(messageId)) return;
-    if (messageId) processedMessages.set(messageId, Date.now());
+    if (messageId) addProcessed(messageId);
 
     const instanceName = typeof body.instance === 'object' ? (body.instance?.instanceName || body.instance?.name || '') : (body.instance || '');
     const remoteJid = data.key.remoteJid || '';
