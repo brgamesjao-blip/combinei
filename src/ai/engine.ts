@@ -8,6 +8,9 @@ import { withCircuitBreaker } from '../utils/circuitBreaker';
 const anthropic = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
 const FALLBACK_MSG = 'Desculpa, estou com um probleminha técnico. Pode tentar de novo em alguns minutos?';
 
+// Extraction prompt é constante — cacheia uma vez no module load
+const EXTRACTION_PROMPT = buildExtractionPrompt();
+
 export async function processarMensagem(
   msg: string, contexto: ContextoConversa, historico?: string
 ): Promise<{ resposta: string; contexto: ContextoConversa }> {
@@ -46,18 +49,23 @@ export async function processarMensagem(
 
   // Debug: log AI call details in development
   logger.debug('AI CALL', {
-    systemPromptLen: systemPrompt.length,
-    systemPromptSample: systemPrompt.substring(0, 300),
+    staticLen: systemPrompt.static.length,
+    dynamicLen: systemPrompt.dynamic.length,
     msgCount: messagesForAI.length,
     lastMsg: messagesForAI[messagesForAI.length - 1]?.content?.substring(0, 200),
   });
 
+  // Prompt caching: bloco estático (clínica + regras) é cacheado por 5min.
+  // Dinâmico (data/hora, slots, histórico) muda a cada call e fica fora do cache.
   const resposta = await withCircuitBreaker<string>('anthropic-chat', async () => {
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 1024,
-      temperature: 0.7, // Lower temp → more consistent responses, still natural
-      system: systemPrompt,
+      temperature: 0.7,
+      system: [
+        { type: 'text', text: systemPrompt.static, cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: systemPrompt.dynamic },
+      ],
       messages: messagesForAI,
     });
     return response.content[0].type === 'text' ? response.content[0].text : '';
@@ -131,7 +139,9 @@ async function extrairDados(
       return anthropic.messages.create({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 300,
-        system: buildExtractionPrompt(),
+        system: [
+          { type: 'text', text: EXTRACTION_PROMPT, cache_control: { type: 'ephemeral' } },
+        ],
         messages: [{ role: 'user', content: userMsg }],
       });
     });

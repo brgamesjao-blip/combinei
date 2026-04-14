@@ -1,6 +1,13 @@
 import { Clinica } from '../types';
 
-export function buildSystemPrompt(clinica: Clinica, horarios: string, historico?: string): string {
+export interface SystemPrompt {
+  /** Parte estável por clínica (cacheável). */
+  static: string;
+  /** Parte volátil (data/hora, slots, histórico) — não cacheável. */
+  dynamic: string;
+}
+
+export function buildSystemPrompt(clinica: Clinica, horarios: string, historico?: string): SystemPrompt {
   var profs = clinica.profissionais.map(function(p) { return '- ' + p.nome + ' (' + p.especialidade + ')'; }).join('\n');
   var servs = clinica.servicos.map(function(s) { return '- ' + s.nome + ' (' + s.duracaoMinutos + ' min' + (s.preco ? ', R$' + s.preco : '') + ')'; }).join('\n');
   // Find the first working day's hours (not always segunda)
@@ -22,7 +29,7 @@ export function buildSystemPrompt(clinica: Clinica, horarios: string, historico?
   var foraHorarioCustom = clinica.msgForaHorario || null;
   var semHorarioCustom = clinica.msgSemHorario || null;
 
-  return 'Você é a ' + botNome + ', recepcionista virtual altamente inteligente e empática da clínica "' + clinica.nome + '".\n' +
+  var staticPart = 'Você é a ' + botNome + ', recepcionista virtual altamente inteligente e empática da clínica "' + clinica.nome + '".\n' +
 'Você atende pacientes pelo WhatsApp com naturalidade, como se fosse uma pessoa real — simpática, profissional, e eficiente.\n\n' +
 
 '═══════════════════════════════════\n' +
@@ -33,14 +40,6 @@ export function buildSystemPrompt(clinica: Clinica, horarios: string, historico?
 'Você é a recepcionista. SEMPRE se refira a si mesma como ' + botNome + '.\n' +
 'Se alguém perguntar seu nome, diga "Sou a ' + botNome + ', da recepção da ' + clinica.nome + '!"\n' +
 'NUNCA diga que é Bia se seu nome foi configurado como outro. Use SEMPRE o nome: ' + botNome + '\n\n' +
-
-'═══════════════════════════════════\n' +
-'CONTEXTO TEMPORAL\n' +
-'═══════════════════════════════════\n' +
-'Data de hoje: ' + dataHoje + '\n' +
-'Dia da semana: ' + diaAtual + '\n' +
-'Hora atual: ' + horaAgora + '\n' +
-'Fuso horário: Brasília (GMT-3)\n\n' +
 
 '═══════════════════════════════════\n' +
 'DADOS DA CLÍNICA\n' +
@@ -56,10 +55,6 @@ export function buildSystemPrompt(clinica: Clinica, horarios: string, historico?
 
 'PROFISSIONAIS DISPONÍVEIS:\n' + profs + '\n\n' +
 'SERVIÇOS OFERECIDOS:\n' + servs + '\n\n' +
-
-'HORÁRIOS DISPONÍVEIS (próximos 14 dias):\n' + (horarios || 'Nenhum horário carregado no momento.') + '\n\n' +
-
-(historico ? '═══════════════════════════════════\nHISTÓRICO DO PACIENTE\n═══════════════════════════════════\n' + historico + '\n\nIMPORTANTE:\n- Se tiver [AGENDADO FUTURO]: o paciente JÁ tem consulta agendada. Se ele quiser marcar outra, pergunte se é realmente uma segunda consulta ou se quer trocar a existente.\n- Se tiver [PASSADO]: paciente já foi atendido antes. Use o nome dele naturalmente.\n\n' : '') +
 
 '═══════════════════════════════════\n' +
 'MENSAGENS PERSONALIZADAS DA CLÍNICA\n' +
@@ -142,7 +137,7 @@ export function buildSystemPrompt(clinica: Clinica, horarios: string, historico?
 'ETAPA 3 — IDENTIFICAR DATA\n' +
 '- Pergunte qual dia o paciente prefere\n' +
 '- Se ele já mencionou ("quarta", "amanhã", "dia 10"), use essa informação\n' +
-'- INTERPRETAÇÃO DE DATAS (baseado na data de hoje ' + dataHoje + '):\n' +
+'- INTERPRETAÇÃO DE DATAS (use a data de hoje fornecida no CONTEXTO TEMPORAL abaixo):\n' +
 '  - "hoje" → data de hoje (só se ainda tem horários disponíveis hoje)\n' +
 '  - "amanhã" → dia seguinte\n' +
 '  - "segunda", "terça", "quarta", "quinta", "sexta" → PRÓXIMA ocorrência desse dia\n' +
@@ -258,6 +253,23 @@ export function buildSystemPrompt(clinica: Clinica, horarios: string, historico?
 '13. SEMPRE inclua duração (ex: "Duração: 30 minutos") na confirmação. Se o serviço tiver preço na lista, inclua também (ex: "Valor: R$150")\n\n' +
 
 'FORMATO DE RESPOSTA: Envie APENAS o texto da mensagem pro WhatsApp. Sem prefixos, sem aspas, sem markdown.';
+
+  var dynamicPart = '═══════════════════════════════════\n' +
+'CONTEXTO TEMPORAL\n' +
+'═══════════════════════════════════\n' +
+'Data de hoje: ' + dataHoje + '\n' +
+'Dia da semana: ' + diaAtual + '\n' +
+'Hora atual: ' + horaAgora + '\n' +
+'Fuso horário: Brasília (GMT-3)\n\n' +
+
+'═══════════════════════════════════\n' +
+'HORÁRIOS DISPONÍVEIS (próximos 14 dias)\n' +
+'═══════════════════════════════════\n' +
+(horarios || 'Nenhum horário carregado no momento.') + '\n\n' +
+
+(historico ? '═══════════════════════════════════\nHISTÓRICO DO PACIENTE\n═══════════════════════════════════\n' + historico + '\n\nIMPORTANTE:\n- Se tiver [AGENDADO FUTURO]: o paciente JÁ tem consulta agendada. Se ele quiser marcar outra, pergunte se é realmente uma segunda consulta ou se quer trocar a existente.\n- Se tiver [PASSADO]: paciente já foi atendido antes. Use o nome dele naturalmente.\n' : '');
+
+  return { static: staticPart, dynamic: dynamicPart };
 }
 
 export function buildExtractionPrompt(): string {
