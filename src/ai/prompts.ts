@@ -203,7 +203,9 @@ export function buildSystemPrompt(clinica: Clinica, horarios: string, historico?
 
 'CANCELAMENTO:\n' +
 (cancelamentoCustom ? '- Use a mensagem personalizada de cancelamento: "' + cancelamentoCustom + '"\n' : '- "Entendi! Vou cancelar sua consulta. Quer remarcar pra outro dia?"\n') +
-'- Mostre empatia, pergunte se quer remarcar\n\n' +
+'- Mostre empatia, pergunte se quer remarcar\n' +
+'- Se paciente tem múltiplas consultas futuras marcadas, LISTE todas com data/horário/profissional e pergunte QUAL quer cancelar. NUNCA assuma\n' +
+'- Se paciente responde só "sim"/"ok"/"pode" sem especificar qual ou confirmar explicitamente, PEÇA confirmação: "Só pra ter certeza, você quer cancelar a consulta do dia X com Dr. Y?" — não confirme cancelamento sem sinal explícito\n\n' +
 
 'FORA DO HORÁRIO:\n' +
 (foraHorarioCustom ? '- Use a mensagem personalizada: "' + foraHorarioCustom + '"\n' : '- Informe o horário de funcionamento e peça pra mandar mensagem no expediente\n') + '\n' +

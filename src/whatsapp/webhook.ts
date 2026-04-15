@@ -562,6 +562,40 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
       return;
     }
 
+    // Guard anti-cancelamento acidental: se a msg atual do paciente é uma
+    // confirmação curta ambígua ("ok"/"sim"/"blz") SEM palavra explícita de
+    // cancelamento e SEM identificação (data/hora/prof), pede confirmação
+    // explícita em vez de executar — o AI pode ter interpretado demais.
+    const d = resultado.contexto.dadosColetados;
+    const msgLower = texto.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const temCancelPalavraNaMsg = /\b(cancel|desmarc|nao vou|nao posso)\b/i.test(msgLower);
+    const msgCurtaAmbigua = texto.trim().length < 20
+      && !temCancelPalavraNaMsg
+      && !d.data && !d.horario && !d.profissional
+      && /^(sim|s|ok|pode|pode ser|ta|blz|beleza|vai|claro|tudo bem|isso|esse|esse mesmo|bora|show|perfeito)[\s.!]*$/i.test(texto.trim());
+
+    if (msgCurtaAmbigua) {
+      const ag = futuros[0];
+      const dt = new Date(ag.data_hora);
+      const dataStr = dt.toLocaleDateString('pt-BR');
+      const horaStr = dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+      const resumo = futuros.length === 1
+        ? `sua consulta do dia ${dataStr} às ${horaStr} com ${ag.profissional_nome}`
+        : `uma das suas ${futuros.length} consultas`;
+      const confirmMsg = `Só pra ter certeza — você quer mesmo cancelar ${resumo}? Me diz "confirma cancelamento" ou o que você quer fazer.`;
+      logger.info('Cancelamento curto ambíguo, pedindo confirmação', { phone, reqId, stage: 'cancel_confirm_needed' });
+      await enviarMensagem(phone, confirmMsg, instanceName);
+      await salvarConversa(clinica.id, phone, {
+        etapa: 'cancelamento_solicitado',
+        dadosColetados: { ...resultado.contexto.dadosColetados, intencao: 'cancelar' } as Record<string, unknown>,
+        historicoMensagens: [
+          ...resultado.contexto.historicoMensagens,
+          { role: 'assistant', content: confirmMsg },
+        ].slice(-30),
+      });
+      return;
+    }
+
     if (futuros.length === 1) {
       // Caso simples — cancela direto
       await cancelarAgendamentoPorId(futuros[0].id);
@@ -572,7 +606,6 @@ async function processarLoteInner(phone: string, texts: string[], instanceName: 
     }
 
     // >1 agendamentos: tenta identificar qual via dados extraídos OU via ordinal na msg
-    const d = resultado.contexto.dadosColetados;
     const match = matchAgendamento(
       { data: d.data, horario: d.horario, profissional: d.profissional },
       futuros,
