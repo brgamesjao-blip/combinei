@@ -82,12 +82,16 @@ export async function processarMensagem(
 
   // Detect appointment conclusion - multiple phrases
   // Only trigger if AI confirms AND we have minimum data (profissional + horario or data)
-  const rl = resposta.toLowerCase();
+  const rl = resposta.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   const hasConfirmPhrase = (
     rl.includes('combinei') || rl.includes('agendado') || rl.includes('agendada') ||
     rl.includes('combinado') || rl.includes('marcado') || rl.includes('marcada') ||
     rl.includes('com sucesso') || rl.includes('agendamento confirmado') ||
-    rl.includes('consulta confirmada') || rl.includes('está confirmad')
+    rl.includes('consulta confirmada') || rl.includes('esta confirmad') ||
+    rl.includes('reservei') || rl.includes('reservado') || rl.includes('reservada') ||
+    rl.includes('confirmado') || rl.includes('confirmada') ||
+    rl.includes('agendei') || rl.includes('marquei') ||
+    rl.includes('pronto') || rl.includes('tudo certo') || rl.includes('prontinho')
   );
   // Must have profissional AND (date or time extracted from AI response)
   const hasDate = !!resposta.match(/\d{2}\/\d{2}/);
