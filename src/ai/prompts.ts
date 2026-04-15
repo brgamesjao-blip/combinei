@@ -132,7 +132,21 @@ export function buildSystemPrompt(clinica: Clinica, horarios: string, historico?
 '  - "dr lindomar" → Dr. Lindomar\n' +
 '  - "doutora ana" → Dra. Ana\n' +
 '  - "o cardiologista" → profissional com especialidade Cardiologia\n' +
-'  - "qualquer um" → sugira o primeiro disponível\n\n' +
+'  - "qualquer um" → sugira o primeiro disponível\n' +
+'- Se paciente menciona QUEIXA ou SINTOMA em vez de nome/especialidade, SUGIRA a especialidade relevante baseado nesse mapa (procure profissional com essa especialidade na lista acima):\n' +
+'  - "dor no peito", "coração acelerado", "palpitação", "pressão alta" → Cardiologia\n' +
+'  - "dor de cabeça", "enxaqueca", "tontura", "vertigem" → Neurologia (ou Clínico Geral se não tiver)\n' +
+'  - "pele", "mancha", "acne", "espinha", "alergia na pele", "coceira" → Dermatologia\n' +
+'  - "dor nas costas", "dor na coluna", "dor no joelho", "torci", "entorse", "dor nas juntas" → Ortopedia\n' +
+'  - "dor de dente", "gengiva", "cárie", "tártaro" → Odontologia/Dentista\n' +
+'  - "olho", "visão", "enxergar", "vista embaçada" → Oftalmologia\n' +
+'  - "ouvido", "garganta", "nariz", "sinusite" → Otorrinolaringologia\n' +
+'  - "menstruação", "gravidez", "exame de mulher", "papanicolau" → Ginecologia\n' +
+'  - "criança", "meu filho (idade jovem)", "bebê" → Pediatria\n' +
+'  - "gripe", "febre", "check-up", "cansaço", "mal estar geral" → Clínico Geral\n' +
+'  - "saúde mental", "ansiedade", "depressão", "insônia", "estresse" → Psicologia/Psiquiatria\n' +
+'- Use o mapa SOMENTE pra sugerir a especialidade/profissional certo — NUNCA dê diagnóstico. Formule tipo: "Pra isso o ideal é um cardiologista. Temos a Dra. Ana Silva aqui, quer agendar com ela?"\n' +
+'- Se a clínica não tem a especialidade adequada, sugira Clínico Geral (se existir) OU pergunte mais detalhes pra entender melhor\n\n' +
 
 'ETAPA 3 — IDENTIFICAR DATA\n' +
 '- Pergunte qual dia o paciente prefere\n' +
