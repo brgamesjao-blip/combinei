@@ -62,6 +62,20 @@
 - **Cleanup com aviso**: limparConversasAntigas tem callback onBeforeDelete. Cron envia "sua conversa expirou — me chama de novo" antes de deletar
 - **Erros diferenciados**: 429/rate limit, 401/403, 529/overloaded, 5xx, circuit, timeout, anthropic, supabase — cada um com mensagem específica pro paciente saber se vale tentar logo ou esperar
 
+### Inteligência conversacional (rodada 2)
+- **Mudança de ideia mid-flow**: detecta sinais ("muda", "trocar", "outro", "na verdade", "melhor") combinados com campo afetado (profissional/dia/hora/servico/horarios). Se não veio novo valor na extração, deleta o campo pra não confirmar com dado obsoleto
+- **Validação final de slot**: `validarSlot()` checa não-passado, dia atendimento, horário func, almoço, e duração não ultrapassa fechamento/invade almoço. Inválido → mensagem específica + reset etapa sem criar agendamento
+- **Cancelamento ambíguo**: >1 agendamentos futuros + "cancela minha consulta" → lista numerada com data/hora/prof + pergunta qual. Extração de data/hora/prof específicos cancela direto. matchAgendamento aceita ordinais ("1", "primeira", "última")
+- **Handler lembrete 24h**: detectarRespostaLembrete (com check de recência 30min e regex exata) interpreta SIM/NÃO ao "Vai poder comparecer?". NÃO → cancela + oferece remarcar. SIM → "te esperamos!"
+- **Confirmações SMS-style**: extração reconhece "blz", "beleza", "tranquilo", "massa", "k", "vlw", "valeu", "perfeito", "show" como confirmação curta (intencao "outro", preserva intent anterior)
+
+### Robustez extra (rodada 2)
+- **Cap processedMessages**: hard limit 50k, remove 10k mais antigos quando estoura (Map insertion-ordered)
+- **Batch hard timeout**: Promise.race 30s evita trava se processarLoteInner hang
+- **Whitespace-only rejeitado**: `!texto || !texto.trim()` antes de virar batch
+- **Cleanup preserva etapas ativas**: handoff_humano, cancelamento_solicitado, aguardando_confirmacao_24h
+- **Sanitizar rawSample em logs**: mascarar "pacienteNome"/"profissional" no raw do Haiku pra não vazar PII (LGPD)
+
 ### ⚠️ Pendente
 - Migration `002_unique_appointment_slot.sql` precisa ser aplicada manualmente no Supabase Dashboard. Antes, conferir duplicatas com:
   ```sql
